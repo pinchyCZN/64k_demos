@@ -1,0 +1,325 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                      LITHIUM: THE GLASS SHATTER
+
+
+Abstract
+
+   The screen breaks into 140 textured triangles that tumble away
+   under gravity - and the same code, run with one flag set, flies
+   them back together into the picture.
+
+   THE ASSEMBLE IS NOT AUTHORED. Shatter_Build plays the explosion
+   through to its end off-screen, negates every velocity, and starts
+   there. The inward flight is the outward one reversed, which is why
+   it costs no extra code and lands every shard exactly on its cell.
+
+   The effect carries no image of its own. It samples segment 0x5ad2,
+   the buffer the title picture and the text renderer compose into -
+   effects/text.txt section 5 - so whatever the scene last drew is
+   what breaks.
+
+   All [verified] from the four routines unless marked.
+
+Table of Contents
+
+   1. The routines
+   2. Lith_Shard
+   3. Shatter_Build, and the reversal
+   4. Shatter_Step
+   5. Shatter_Draw
+      5.1. The draw races the tick
+      5.2. The shards come back
+   6. Scene_Shatter
+      6.1. The script uploads the DAC itself
+      6.2. The picture is pre-rendered
+   7. Open questions
+
+1.  The routines
+
+       Shatter_Build      1000:2803  tile the screen, set the start
+       Shatter_InitShard  1000:2c78  one shard's velocities
+       Shatter_Step       1000:2c05  one tick of the simulation
+       Shatter_Draw       1000:2ac1  project, texture and fill
+       Scene_Shatter      1000:2919  the scene runner
+       Tick_Shatter       1000:644e  the tick handler it installs
+
+   Shatter_Build has two callers: Scene_Shatter, and 1000:094e inside
+   maybe_Scene_BumpShatter - so the effect appears twice.
+
+2.  Lith_Shard
+
+   0x30 bytes, at 0x2ad2:0x4000 + 0x30n, g_ShardCount of them.
+
+       +0x00  short[6]  three local corners, x,y pairs, all +/-16
+       +0x0c  short[3]  position x, y, z
+       +0x12  short[3]  rotation x, y, z
+       +0x18  short[3]  angular velocity
+       +0x1e  short[3]  velocity
+       +0x24  short[6]  three source u,v - where it came from
+
+   Every offset is touched by Shatter_Step or Shatter_Draw, so the
+   layout is read off use rather than inferred from spacing.
+
+   THE CORNERS ARE A QUAD CUT IN TWO. A cell emits two records:
+
+       (-16,-16)  (+16,-16)  (-16,+16)
+       (-16,+16)  (+16,-16)  (+16,+16)
+
+   which is a 32 x 32 square split along its diagonal.
+
+3.  Shatter_Build, and the reversal
+
+   1000:2803.
+
+       DS = 0x2ad2, DI = 0x4000, g_ShardCount = 0
+       for dx = -0x54 to 0x74 step 0x20            7 rows
+         for cx = -0x90 to 0xb0 step 0x20          10 columns
+           emit the two records above
+           source u,v = cx + 0x90, dx + 0x54
+           Shatter_InitShard
+           g_ShardCount++
+
+   7 x 10 x 2 is 140 shards. The origins 0x90 and 0x54 are 144 and 84,
+   a 320 x 200 screen less the 16-pixel half-cell, so the grid is
+   centred.
+
+   3.1.  The velocities are not noise
+
+      Shatter_InitShard at 1000:2c78:
+
+          pos   = (cx, dx, 0x100)
+          angle = (0, 0, 0)
+          angvel_{x,y,z} = Rnd_Next >> 7
+          vel_x = (Rnd_Next >> 0xc) + (cx >> 6)
+          vel_y = (Rnd_Next >> 0xc) + (dx >> 6)
+                                    + ((|cx| - 0xa0) >> 3)
+          vel_z = ((0x104 - (|cx| + |dx|)) >> 4) + 5
+
+      EACH VELOCITY CARRIES A TERM IN THE SHARD'S OWN GRID POSITION,
+      so shards far from the centre leave faster and the sheet opens
+      outward. The random part only breaks up the regularity. A pure
+      random velocity would dissolve the picture instead of bursting
+      it.
+
+      Z IS A CONE AND CARRIES NO RANDOM AT ALL, img 0x2ce1 to
+      0x2cfd: both shards of a cell get the same one and it falls
+      off with the distance from the grid's centre, from 19 in the
+      middle to 5 at the corners. So the sheet does not merely open
+      outward - its middle comes at the camera hardest.
+
+      The tumble, by contrast, is pure noise - there is no positional
+      term in angvel at all.
+
+      THE WHOLE BUILD IS BYTE-EXACT against the emulator over all
+      6,720 bytes of the array, seeded from the generator's state at
+      img 0x2803: the grid bounds, the diagonal split, the per-corner
+      source u,v, the three angular randoms and all three velocities
+      [verified]. Five Rnd_Next calls a shard, in that order.
+
+   3.2.  The reversal
+
+      If g_ShatterAssemble is set, Shatter_Build does not return after
+      building. It runs the whole effect:
+
+          do { Shatter_Step x5;  Shatter_Draw }
+          while g_ShardsOnScreen != 0
+          per shard:  negate vel and angvel;  vel_y++
+          Mem_ClearSegment 0x4ad2 and 0xa000
+
+      THE SHARDS ARE LEFT WHERE THEY ENDED UP, carrying the exact
+      velocities that took them there, reversed. Running forward from
+      that state retraces the explosion backwards and every shard
+      lands on its own cell.
+
+      THE INC AT 1000:2903 IS THE GRAVITY CORRECTION, not a fudge. A
+      forward step is pos += vel and then vel_y += 1, so the state
+      that undoes it needs vel_y' = -(vel_y - 1) = -vel_y + 1.
+      Negating alone leaves every shard a pixel a tick adrift and the
+      sheet does not close.
+
+      THE FIVE STEPS ARE A FAST-FORWARD. Only the draw refreshes
+      g_ShardsOnScreen, so the loop samples the test once per five
+      ticks of simulation rather than once per tick - the live effect
+      steps once a tick. The pre-run draws into a buffer that is then
+      cleared, so none of it reaches the screen.
+
+      g_ShatterAssemble 1000:8f85 IS SET IN ONE PLACE: Demo_Main at
+      1000:0305, immediately before the Scene_Shatter that transitions
+      into the battle. maybe_Scene_BumpShatter clears it at 1000:0948
+      for the forward break, and nothing else writes it.
+
+4.  Shatter_Step
+
+   1000:2c05, one tick, every shard.
+
+       per Lith_Shard:
+           pos   += vel
+           vel_y++                     gravity, one unit a tick
+           angle += angvel
+           if pos_z <= 0x100:  zero vel and angvel
+           bp += 0x30
+
+   0x100 IS WHERE A SHARD BELONGS. Shatter_InitShard starts every
+   shard at pos_z = 0x100, so in the assembling direction a shard
+   flies in, reaches its home plane and stops dead. That one test is
+   the whole arrival mechanism; nothing else checks whether a shard
+   has got home.
+
+5.  Shatter_Draw
+
+   1000:2ac1.
+
+       g_ShardsOnScreen = 0
+       per Lith_Shard:
+           g_RotAngleY = angle_x       NOTE THE SWAP
+           g_RotAngleX = angle_y
+           g_RotAngleZ = angle_z
+           for each of the three corners:
+               eax, ebx = the corner, ecx = 0
+               Vec_RotY, SAR 9;  Vec_RotX, SAR 9;  Vec_RotZ, SAR 9
+               add pos_{x,y,z} << 9
+               ecx = max(ecx, 0x3e8)
+               x = ((eax << 8) / ecx) + 0xa0
+               y = ((ebx << 8) / ecx) + 0x64
+               if x <= 0x140 and y <= 0xc8: g_ShardsOnScreen++
+               g_PolyArgs gets x, y and the source u,v, the latter
+               clamped to 0x13f and 0xc7
+           GS = 0x5ad2, g_SpanRoutine = 0x3c46, Poly_Fill
+
+   The near clamp at 0x3e8 is what stops a shard that has passed the
+   camera from dividing by something near zero.
+
+   g_ShardsOnScreen IS THE TERMINATION TEST, counted here and read by
+   both callers: the shatter runs until no projected corner lands
+   inside 320 x 200.
+
+   THE TWO BOUNDS ARE NOT TESTED ALIKE. 1000:2b94 is a JA, unsigned,
+   so a shard off the LEFT edge fails it, while 1000:2b99 is a JG,
+   signed, so a shard above the TOP edge still counts. The effect
+   therefore runs on while anything is above the screen and stops the
+   moment the last shard leaves it sideways.
+
+   THE FILL IS Poly_Fill through the fifth span routine, 1000:3c46,
+   whose texture is a screen at stride 320 rather than a 256 x 256
+   map - subsystems/raster.txt section 3.4.
+
+   Build, Step and Draw are byte-exact against the emulator: the
+   whole 6,720-byte array after a build and after a step, and all
+   64,000 bytes of the frame the draw composes, measured on the
+   106-shard prefix described below [verified].
+
+5.1.  The draw races the tick
+
+   THE SHARDS MOVE WHILE THE DRAW RUNS. Tick_Shatter is installed on
+   the 57 Hz handler and calls Shatter_Step, and a full 140-shard
+   pass takes longer than a tick - so the array is one step ahead for
+   every shard drawn after the interrupt lands. Dumping 0x2ad2:0x4000
+   at 1000:2ac1 and again at the RET of the same pass shows exactly
+   one step applied, 1,173 bytes changed [verified].
+
+   THE BUILD ITSELF IS OUTSIDE THE RACE. Scene_Shatter installs
+   Tick_Shatter at img 0x291c, one instruction after Shatter_Build
+   returns, so nothing steps the array while the build and its
+   reverse pass run. The 6,720 bytes read at img 0x2923, the loop's
+   first instruction, are reproducible, and that is where a build
+   capture is taken - a halt already inside the loop has the array
+   part-flown and cannot serve [verified].
+
+   A frame of the shatter is therefore NOT internally consistent, and
+   where the seam falls moves with the CPU. Two captures of the same
+   pass from the same starting point differ by thousands of pixels. The
+   first 106 shards are what the original gets through before the
+   first tick at the measured speed, and that prefix is reproducible.
+
+   This is the one place in the demo where a deterministic
+   reconstruction cannot match a full-frame capture, and it is a
+   property of the original rather than a gap in the port.
+
+   The store addresses pin g_PolyArgs at 1000:e1b2 - x and y as words
+   at +0x00 with stride 4, the source u at +0x14 and v at +0x24 as
+   dwords - which agrees with g_FlickerTable sitting at 0xe1e6, four
+   bytes past its end.
+
+5.2.  The shards come back
+
+   A SHARD'S POSITION IS THREE WORDS AND THEY WRAP. Shatter_Step
+   adds the velocity straight into them at 1000:2c05 with no bound,
+   and gravity adds 1 to the y velocity every tick - so y grows as
+   half the square of the tick count and crosses 32767 about 252
+   ticks after the build.
+
+   The wrapped shards sweep back UP through the screen as a scatter
+   of tiny triangles. Phase four ends at 293 ticks - section 6 of
+   effects/rock.txt - so the original shows that for about forty
+   ticks and then leaves; it is visible, and it is not a defect to
+   be bounded away. A reconstruction that runs the phase on shows it
+   for as long as it runs.
+
+   THE DRAW NEVER STOPS EITHER. Nothing tests g_ShardsOnScreen on
+   this path - the phase ends on the ROCK - so Shatter_Draw walks
+   all 140 shards every frame from the break to the end of the shot,
+   long after the glass has left the screen. At 1000:2b6b that costs
+   nothing visible because the projection divides a 64-bit dividend
+   and the shards land far below the screen; narrowing it to 32 bits
+   is what puts them back ON it - subsystems/raster.txt section 2.
+
+6.  Scene_Shatter
+
+   1000:2919, called from the main script at 1000:030b.
+
+       Shatter_Build
+       g_TickHandler = Tick_Shatter
+       loop:  Dirty_Reset;  Shatter_Draw;  cs:[0x8ffd] = 0x80808080
+              Screen_PresentDirty;  Demo_PollKeys
+       until: g_ShatterAssemble == 1 ? shard 0's pos_z <= 0x100
+                                     : g_ShardsOnScreen == 0
+       if assembling: Screen_BlitFull with AX = 0x5ad2
+
+   THE TWO DIRECTIONS END ON DIFFERENT TESTS. The shatter ends when
+   nothing is left on screen; the assemble ends when the FIRST shard
+   reaches its home plane, read straight out of 0x2ad2:0x4010.
+
+   g_PresentFill at 1000:8ffd IS THE ERASE COLOUR, not a flag.
+   Screen_PresentDirty blits the dirty box and then fills that same
+   box in 0x4ad2 with this dword, 1000:35ce - so a scene chooses
+   what its background clears to, and 0x80808080 is the mid grey the
+   shards fly over. maybe_Scene_BumpShatter sets 0 instead, because
+   the tunnel covers every pixel and has nothing to clear to.
+
+   6.1.  The script uploads the DAC itself, and the order matters
+
+      1000:02ed sets the fade to -0x40, 1000:02f4 sets the TARGET to
+      the same value, 1000:02fb calls Pal_Upload, and only then does
+      1000:02fe point g_PalSource at g_Pal1.
+
+      THE EXPLICIT UPLOAD IS LOAD-BEARING. Tick_Default refreshes the
+      DAC only while the fade is still travelling - 1000:6d08 tests
+      fade against target - and this scene sets the two equal, so
+      nothing in the loop will ever upload. Without that one call the
+      DAC keeps whatever the tunnel faded it to, which is black, and
+      the whole assemble plays into a palette of zeros.
+
+      SETTING THE SOURCE AFTERWARDS IS ALSO DELIBERATE. The upload
+      has already happened, so the assemble is shown in the palette
+      the TUNNEL left; g_Pal1 does not reach the DAC until the
+      white-out moves the fade again - section 5.2 of
+      effects/battle.txt.
+
+   6.2.  The picture is pre-rendered
+
+      Tex_SnapshotFrame at 1000:2496 builds it before the transition
+      starts - subsystems/texture.txt - so what the shards assemble
+      into is a frame of the battle's opening view that was never on
+      screen. It puts slots 0 and 4 at 0x46000, fills 0x4ad2 with
+      0x80808080, builds the terrain and draws it with the sky and
+      the flare, then copies all 64,000 bytes into 0x5ad2.
+
+      THE BLIT AT 1000:295b IS WHAT SHOWS IT WHOLE. The assembled
+      shards are 140 triangles with seams; the scene ends by putting
+      the original 0x5ad2 on screen, so the seams never show.
+
+7.  Open questions
+
+   o Nothing outstanding.

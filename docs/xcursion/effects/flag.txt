@@ -1,0 +1,191 @@
+PCDEMOS 64k                                            Analysis Note
+
+
+                    EXCURSION: THE WAVING FLAG
+
+
+Abstract
+
+   Flag_Render at 1000:2504 - the word VISTA, drawn into a field and
+   then displaced by two scrolling samples of a sine field, written as
+   2x2 blocks straight to 0xA000.
+
+   Its part is sync 0x37 mode 0x17, between the ship landing and the
+   car scene.
+
+   THE ROUTINE WAS TWICE MISNAMED and once mis-described. Section 4
+   says why, because the cause was a misreading of g_TickCount that
+   affected other documents too.
+
+Table of Contents
+
+   1. What it draws
+      1.1. The field it is displaced by
+   2. The displacement
+   3. The waving, and the two fades
+   4. The pole, and what is behind the cloth
+   5. The two errors
+   6. Open questions
+
+1.  What it draws
+
+   The source is text, not an image [verified]:
+
+       img 5116   g_BannerTextRec = 0x97d7
+       img 5123   Text_BuildBanner
+       img 5144   Flag_Render
+
+   The record at cs:0x97d7 is three words - string pointer 0xa590,
+   destination offset 0x3000, length 0x20 - and the string at img
+   0xa590 is "VISTA   !" [verified]. g_BannerRecs holds three such
+   records; the other two are "bEXCURSION" and "  HUI!".
+
+   So the flag's cloth is the word VISTA rendered from the same font
+   and the same string block as every other caption in the demo -
+   g_TextStrings at img 0xa523, through g_Font32 at img 0x615e, the
+   demo's own 32x32 font. No flag bitmap exists in the image.
+
+   AND Text_BuildBanner BLENDS RATHER THAN DRAWS. img 0x33ec does
+   al = dest[di] >> 1 + g_BannerBright, which the part sets to 0x30 at
+   img 0x511d - so the letters are a halved-and-brightened copy of
+   whatever was already in the field. That is why the cloth carries
+   the plasma's texture instead of being flat.
+
+   IT WRITES THE CALLER'S SEGMENT and sets none itself, unlike
+   Text_BuildMask which pins ES = 0x6a79. At img 0x5123 ES is 0x2a79 -
+   what Voxel_Render left at img 0x364b - which is exactly the segment
+   Flag_Render then reads as DS. The two are connected by a register
+   nobody reloads.
+
+1.1.  The field it is displaced by
+
+   img 0x507a builds it, immediately before the part runs, so the
+   question of which producer last wrote 0x8a79 + 0x4564 is settled
+   [verified]: this part does.
+
+   IT IS NOT THE WATER'S FIELD, though the two share a shape. Both
+   are 128 by 128 sums of two sine lookups, but this one samples at
+   SINGLE frequency where img 0x3a7f doubles it, shifts the sum right
+   7 where that shifts 9, and adds a 0x80 bias where that leaves the
+   result signed. The flag reads it unsigned, and the bias is what
+   centres the ripple on no displacement.
+
+2.  The displacement
+
+   Per 2x2 block, img 0x2524 to 0x2584 [verified]:
+
+       DS = 0x2a79   the source, holding the text
+       ES = 0xa000   VGA, with no work buffer in between
+       FS = g_WorkSeg
+       GS = 0x8a79   the sine field, wrapped & 0x3fff
+
+       bl = GS[(g_WarpOfsX + SI) & 0x3fff + 0x4564] >> 2 - 0x70
+       al = GS[(g_WarpOfsY + SI) & 0x3fff + 0x4564] & 0xfc
+       ax = (al << 6) - 0x4200
+       bx = bl + ax + SI
+
+   The y displacement is shifted left 6 BECAUSE THE SOURCE STRIDE IS
+   0x100 - it is pre-multiplied into a row offset rather than being
+   multiplied per sample.
+
+       img 255a   the bounds test is BL < 0xa0 AND BH < 0x80, the two
+                  halves of BX checked separately
+       img 2574   out of range reads THE WORK BUFFER
+
+   That fallback is the whole reason the scene works: the 186x152
+   panel sits over whatever the previous frame left, so the landscape
+   shows around and through the flag instead of a black box.
+
+       img 258c   SI += 0x146, DI += 0x1c6 per row. With 93 columns of
+                  2 that is 512 source bytes and 640 screen bytes -
+                  two rows of each, so a half-resolution copy.
+
+   The panel is 186x152 at x=70, y=24.
+
+3.  The waving, and the two fades
+
+   The mode 0x17 handler at img 0x1975 scrolls the two offsets while
+   this runs [verified]:
+
+       g_WarpOfsX++
+       g_WarpOfsY += 0x102
+
+   0x102 advances that word's low byte by 2 and its high byte by 1 -
+   two rates in one add, the same idiom as mode 0's g_FireTexBase and
+   the opposite side of the byte-packing Warp_RenderFull does.
+
+   So the x phase creeps and the y phase moves at two speeds at once,
+   which is what keeps the ripple from looking periodic.
+
+   THE SAME HANDLER FADES THE PART IN AND OUT WITH ONE SUBTRACT
+   [verified]. img 0x1993 takes 0xf0 off g_FadeLevel and applies it:
+
+       row <= 0x1c and level == 0    leave it alone, img 0x1989
+       otherwise                     level -= 0xf0, then Pal_Fade
+
+   THE STEP IS 0xf0 AND NOT 0x100 BECAUSE OF WHERE IT STARTS. The
+   part sets the level to 0x2d00 at img 0x5129, and 0x2d00 is exactly
+   48 steps of 0xf0 - so the fade-in from white reaches zero on the
+   nose and the test stops it there. A step of 0x100 would skip past
+   zero and the scene would keep darkening instead of holding.
+
+   Past row 0x1c the test stops guarding and the same subtract runs
+   on, carrying the level below zero and fading the part out to
+   black. One instruction, both transitions, and the part ends four
+   rows later at the g_TickTarget of 0x20.
+
+   The white it fades in FROM is not a fade at all: the previous
+   part's tail sets the level to 0x2d00 and calls Pal_Fade once at
+   img 0x5062, so the landing cuts to white in a single frame.
+
+4.  The pole, and what is behind the cloth
+
+   The part draws its backdrop ONCE and freezes it [verified]:
+
+       img 50c2   g_CamAngleNext += 0x200
+       img 50c9   Voxel_Render, one frame into the work buffer
+       img 50d7   THE FLAGPOLE, straight over it
+       img 5126   Vga_Present, the only one in the part
+
+   The pole is two dwords of fixed gradient - 9f 98 90 88 80 78 70
+   68 - stored at offset 0x1e48 and repeated down 0xb0 rows: eight
+   pixels wide, 176 tall, at screen x 72, y 24. No model, no shading,
+   no loop over anything but the rows.
+
+   Flag_Render then writes STRAIGHT TO 0xA000 every frame with no
+   present of its own, which is why the work buffer behind it never
+   changes for the whole part. The out-of-range fallback at img
+   0x2574 copies that frozen buffer back, so it both lets the
+   landscape show around the cloth AND erases the cloth's previous
+   position - the two buffers cannot be collapsed into one.
+
+5.  The two errors
+
+4.  The two errors
+
+   The routine was maybe_Warp_Render, then Warp_RenderPanel with a
+   note reading "ONE CALL SITE, and it is a TRANSITION not a scene".
+   The reasoning was that img 0x25a7 makes the loop wait on
+   g_TickTarget as well as the music position, and the part sets 0x20.
+
+   G_TICKCOUNT COUNTS MUSIC ROWS, NOT TIMER TICKS. Timer_Isr
+   increments it at img 0x0cb7 only once g_RowTickCount reaches
+   g_TicksPerRow - statically 6 - and maybe_Music_Step zeroes it at
+   img 0x222d on each order change. So it is rows elapsed within the
+   current order position, and 0x20 is 32 rows: half a pattern, which
+   is seconds.
+
+   EVERY g_TickTarget AND g_TickCount THRESHOLD IN THE DEMO IS
+   THEREFORE IN ROWS. The ones already recorded elsewhere - 0x1c in
+   mode 0x17, 0x20 in mode 0xd, 0x3c in modes 0x14 and 0x15, 0x18 in
+   modes 5 and 0xb - are all scene-scale, not sub-second.
+
+   The second error followed from the first: a routine believed to run
+   for a third of a second was not worth asking what it displaced, so
+   the VISTA banner feeding it went unnoticed even though the call sits
+   two instructions away at img 0x5123.
+
+6.  Open questions
+
+   o sim/ has no part for this. src/xcursion has scene_flag and
+     Xcur_FlagRender; sim/ still needs Text_BuildBanner and the font.

@@ -1,0 +1,100 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                   UKKO: VIDEO, AND WHY IT GOES BLACK
+
+
+Abstract
+
+   The demo uses two video modes and programs one palette. All
+   [verified] from the depacked listing.
+
+   THE MODE 13h PART OF THE DEMO DRAWS WHITE ON BLACK IN A PALETTE
+   WHERE BOTH ARE BLACK. That is a defect in the demo, not in any
+   emulator, and it explains the reported symptom exactly: the music
+   plays, the mode 0Dh logos appear, and the stick figure's scenes
+   are a black screen.
+
+Table of Contents
+
+   1. The two modes
+   2. The palette
+   3. Why the figure disappears
+   4. Why the logos survive
+   5. Open questions
+
+1.  The two modes
+
+   Six mode sets, all of them found:
+
+       1020:e60f   AX=0x13    mode 13h, before the palette
+       1020:e64b   AL=0x0d    mode 0Dh, for the title logo
+       1020:e690   AX=0x13    mode 13h, for the dance
+       1020:f19d   AL=0x0d    mode 0Dh, an interlude
+       1020:f1cf   AL=0x0d    mode 0Dh, an interlude
+       1020:f246   AX=0x13    mode 13h, after an interlude
+
+   Mode 13h is 320x200 in 256 colours through the DAC. Mode 0Dh is
+   320x200 EGA planar, whose sixteen attributes go through the
+   attribute controller.
+
+2.  The palette
+
+   ONE palette program exists in the whole image, at 1020:e614:
+
+       dx = 0x3c8;  al = 0;  out dx, al
+       inc dx;  cx = 0x100
+     again:
+       al = cl;  neg al;  shr al, 2
+       out dx, al  x3
+       loop again
+
+   A LINEAR GREYSCALE. The DAC index auto-increments from 0 and each
+   entry gets (-cl) >> 2 with R, G and B equal, so index 0 is black
+   and INDEX 255 IS 0x3f, FULL WHITE.
+
+   IT RUNS ONCE, immediately after the first mode 13h set, and
+   nothing in the image writes 0x3c8 or 0x3c9 again.
+
+3.  Why the figure disappears
+
+   AN INT 10h MODE SET RELOADS THE DAC. The ramp is programmed at
+   1020:e614 and then destroyed three times over - by the mode 0Dh
+   set at 1020:e64b, by the mode 13h set at 1020:e690 that begins
+   the dance, and again at 1020:f246 after every interlude.
+
+   EVERYTHING IN MODE 13h IS DRAWN IN INDEX 0xff. The pen byte at
+   1020:013a is set to 0xff at 1020:e6a9 and 1020:eeeb, and the four
+   backdrops contain exactly two values, 0x00 and 0xff [verified by
+   counting every byte of all four].
+
+   THE DEFAULT MODE 13h PALETTE ENDS IN BLACK. In the standard VGA
+   DAC the last eight entries, 248 to 255, are black - so after the
+   mode set at 1020:e690 the demo is drawing black lines on a black
+   background, and stays that way for the rest of the run.
+
+   The demo presumably ran on a card whose BIOS did not fully reload
+   the DAC, or was tested before the logo was added [inferred - the
+   defect is certain, its history is not].
+
+4.  Why the logos survive
+
+   Mode 0Dh does not use the DAC the same way: its sixteen
+   attributes are resolved through the attribute controller, which a
+   mode set programs to the standard EGA colours. Attribute 1 is
+   visible against attribute 0 whatever the DAC's upper entries hold,
+   so the one-bitplane screens come out correctly.
+
+   THE SYMPTOM IS THEREFORE DIAGNOSTIC. Music plus logos plus a
+   black dance is exactly what this defect predicts, and it rules
+   out the soundcard prompt and the video mode as the cause.
+
+5.  Open questions
+
+   o Whether any real VGA BIOS of the period left the upper DAC
+     entries alone on a mode set. That would explain how the demo
+     ever worked.
+
+   o What the greyscale ramp was for at all. Nothing in the demo
+     uses an index other than 0x00 and 0xff, so a 256-entry ramp is
+     more than the artwork needs.

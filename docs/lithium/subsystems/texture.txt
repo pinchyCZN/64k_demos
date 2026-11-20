@@ -1,0 +1,406 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                 LITHIUM: THE TEXTURE AND THE PALETTES
+
+
+Abstract
+
+   Where the chrome comes from. The environment map is not stored
+   anywhere - it is GENERATED in about eight lines of code from a
+   random number generator, a 16x16 disc and a blur.
+
+   IT IS NOT THE ONLY GENERATED TEXTURE. A second family builds
+   RADIAL ones analytically - glowing discs and cones - out of a table
+   of squares inverted by binary search, with no multiply and no
+   divide anywhere. Section 6.
+
+   One of the three palettes is generated too, and animated every
+   frame, which is the colour cycling. The other two are stored in the
+   image, and both are FOUR 64-ENTRY RISING RAMPS - the shape the
+   rasteriser's band offsets need.
+
+   Everything here is [verified] from the routines, and the numbers
+   quoted for the generated map come from running the transcription in
+   sim/lithium/parts.py.
+
+Table of Contents
+
+   1. Why there is no texture in the image
+   2. Rnd_Next, and why its seed matters
+   3. Tex_Plot and Tex_Stroke
+   4. Tex_Blur, and its twin
+   5. What comes out
+   6. The radial textures
+      6.1. Math_Sqrt
+      6.2. The three generators
+   7. Pal_Animate, the colour cycling
+   8. The two stored palettes
+   9. Open questions
+
+1.  Why there is no texture in the image
+
+   Tex_BuildSphereMap at 1000:5899, called from Demo_Main at
+   1000:0168 - before INT 10h even sets mode 13h. Five steps:
+
+       1  zero all 64 KB of segment 0x6ad2
+       2  35 random walks: two Rnd_Next calls give a start point with
+          the bytes complemented, then 450 calls to Tex_Stroke
+       3  85 radial streaks: a random angle into g_SinTable and a
+          random radius place a start point on a circle centred on
+          0xde, 0xde, then 250 calls to Tex_Stroke
+       4  Tex_Blur eight times over the whole segment
+       5  halve every byte - DI walks down from 0xffff with
+          SHR byte ptr [DI],1 - so the map ends in 0..0x7f
+
+   That is 37,000 dots and two loops. A stored 256x256 texture would
+   be 64 KB; the whole packed demo is 63 KB.
+
+   ES IS LEFT AT 0xa000 DURING STEPS 2 AND 3. It looks like the
+   routine is scribbling on the screen and it is not: this runs before
+   mode 13h, and Tex_Plot writes through DS.
+
+2.  Rnd_Next, and why its seed matters
+
+   1000:3dfc, two words of state:
+
+       ax = g_RndState0
+       dx = g_RndState1
+       xchg ah, dl              swap a byte between the halves
+       ax += dx
+       g_RndState0 = dx         shift the register along
+       g_RndState1 = ax
+       return rol(ax, 2)
+
+   The ROL affects the returned value only, not the state.
+
+   THE SEED IS LOAD-BEARING AND IT IS IN THE IMAGE: g_RndState0 and
+   g_RndState1 ship as 0xa5b5 and 0xcab6 at img 0x8f20. A ZERO STATE
+   IS A FIXED POINT - with (0, 0) the generator returns the same
+   number for ever and the map comes out blank, so a transcription
+   cannot default the state to zero.
+
+   1000:52dd reseeds the generator, but Demo_Main calls it at
+   1000:01f1, AFTER the map is built. Nothing is ever seeded from a
+   clock, so THE DEMO DRAWS THE SAME MAP ON EVERY RUN - which is what
+   makes caching the generated result safe.
+
+3.  Tex_Plot and Tex_Stroke
+
+   3.1.  Tex_Plot, 1000:597f
+
+          reject if x >= 0xff or y >= 0xff   JNC, SO THE BOUND IS >=
+                                             AND 255 ITSELF IS OUT.
+                                             Unsigned, so a negative
+                                             coordinate arrives as a
+                                             large word and is dropped
+          reject if x + y < 0x46             THE DIAGONAL
+          si = (y << 8) + x
+          16 rows of 16 bytes:
+              [si] += brush[di]
+              if the byte goes negative, store 0x7f    saturate
+          si advances 0x100 - 0x10 per row, WRAPPING at 16 bits
+
+       THE >= IS WORTH THE CARE IT LOOKS LIKE IT DOES NOT NEED.
+       1000:5982 and 1000:5988 are JNC, not JA, so a brush ORIGIN at
+       exactly 255 is rejected. Reading them as > admits 255, and
+       because the brush then wraps at 16 bits the extra ink lands on
+       the opposite edges - the interior of the map is unaffected and
+       only its first and last rows and columns come out too bright.
+       That was 10.4 per cent of the map, every byte of it high by 1
+       to 9, and it put a uniform +1 through the whole rendered
+       frame [verified; with the bound correct the port's map is
+       byte-identical to the demo's across all 65,536].
+
+      The brush at img 0x9f31 is a 16x16 DISC OF 1s - 174 of its 256
+      bytes set - so one dot raises a round patch by one, and thousands
+      of overlapping dots build a cloudy field that saturates at 0x7f.
+
+      THE DIAGONAL REJECT IS THE DISTANCE FOG. The (0,0) corner of the
+      map is where Scene_ProjectVerts drags the coordinates of a far
+      surface, so keeping that corner dark gives fog for two divides
+      and no blending - raster.txt section 2.1.
+
+      DARK, NOT BLACK. Generating the map measures the protected
+      triangle at a MEAN OF 3.1 against 23.4 over the whole map, with
+      isolated values up to 49 along its hypotenuse: the eight blur
+      passes bleed light back across the diagonal. So the fog fades
+      toward a dark value, not to zero.
+
+   3.2.  Tex_Stroke, 1000:5938
+
+          bx = Rnd_Next & 0x1ffc                    a random angle
+          r  = (Rnd_Next >> 3) + 0xa0               a random radius
+          x  = (sin(bx) * r) >> 0x12  + g_StrokeX
+          y  = (cos(bx) * r) >> 0x12  + g_StrokeY
+          Tex_Plot
+
+      IT DOES NOT STEP ALONG A PATH. Every call scatters one dot
+      somewhere on a circle of random radius about the current stroke
+      centre, and the radius reaches about 130 pixels - so a "stroke"
+      is a sparse cloud, not a line, and plenty of its dots fall
+      outside the map and are dropped.
+
+4.  Tex_Blur, and its twin
+
+   THERE ARE THREE COPIES OF THE SAME AVERAGING in the image, and
+   they differ by one constant each:
+
+   +--------------------+------------+--------+-----------------+
+   | Routine            | Row stride | Decays | Used for        |
+   +====================+============+========+=================+
+   | Tex_Blur 0x4aee    | 0x100      | no     | the chrome map, |
+   |                    |            |        | the heightmap   |
+   | Image_Blur 0x4b15  | 0x140      | no     | 320-wide images |
+   | 1000:08af          | 0x140      | YES    | the bump field  |
+   +--------------------+------------+--------+-----------------+
+
+   The first two are twelve instructions each and identical but for
+   the stride, so one serves 256-wide buffers and the other
+   screen-shaped ones. The third subtracts one after the shift,
+   which is what makes a bump drain rather than merely spread -
+   ../effects/bump.txt section 3.
+
+   Neither of the first two bounds di: it wraps the whole 64 KB, so
+   the first and last rows blur against the far end of the segment.
+
+   4.1.  The algorithm
+
+   1000:4aee, the mean of four neighbours, repeated CX times:
+
+       ax = 0
+       al += [di-1];      adc ah, 0        left
+       al += [di+1];      adc ah, 0        right
+       al += [di+0x100];  adc ah, 0        one row down
+       al += [di+0xff00]; adc ah, 0        one row up
+       ax >>= 2
+       [di] = al
+       inc di   until it wraps to zero
+
+   THE +0x100 AND -0x100 NEIGHBOURS ARE WHY THE MAP IS 256 WIDE, and
+   DI wrapping at 16 bits is why it is exactly 256x256. The ADC into
+   AH sums four bytes into 16 bits without widening any of them.
+
+   IT BLURS IN PLACE, so it is not a true box filter: the left and
+   upper neighbours have already been replaced this pass, which makes
+   the smear directional. A two-buffer blur gives a different texture,
+   so this is load-bearing rather than a detail.
+
+5.  What comes out
+
+   From running the transcription:
+
+   +------------------------+------------------------------------------+
+   | range                  | 0 to 59, mean 23.4                       |
+   | the x+y<0x46 triangle  | mean 3.1, max 49 - the fog corner        |
+   | brightest corner       | 240,240 at mean 58.7                     |
+   | build cost             | about one second in Python               |
+   +------------------------+------------------------------------------+
+
+   THE BAND DESIGN CHECKS OUT END TO END. Texels of a rendered model
+   come out in 11..59, so Poly_Fill adding 0x40 lands them in 75..123
+   and adding 0xc0 lands them in 203..251 - three distinct 64-entry
+   bands, none of them straddling a boundary. raster.txt section 4.
+
+   Step 5, the halving, is what guarantees that: without it a texel
+   could reach 0xff and any band offset would wrap.
+
+6.  The radial textures
+
+   A second, entirely separate family. Where Tex_Plot and Tex_Blur
+   build the chrome map out of noise, these compute a distance for
+   every pixel and shade by it.
+
+   6.1.  Math_Sqrt
+
+      1000:4a91. EAX in, SI out AS A BYTE OFFSET - every caller
+      shifts it right by 2 to get the root.
+
+          bx = si = 0xc80                 the MIDPOINT, entry 800
+          repeat:
+              bx >>= 1;  bx &= 0xfffc     halve, stay dword-aligned
+              compare |g_SquareTable[si] - eax| with the same at
+              si +/- bx, and step toward the smaller
+
+      THE TABLE IS INVERTED RATHER THAN A ROOT BEING COMPUTED. Ten
+      halvings of a dword-aligned index land on the nearest entry -
+      ten compares, no divide.
+
+      g_SquareTable at 1000:c8b2 IS ZERO IN THE IMAGE.
+      Math_BuildSquareTable at 1000:5334 fills it at startup, called
+      from the main script at 1000:0232 and 1000:02c0:
+
+          edx = 0x640;  di = 0xc8b2
+          loop:  eax = 0x641 - edx;  eax *= eax
+                 cs:[di] = eax;  di += 4;  edx--
+
+      SO IT IS 1600 ENTRIES, entry i holding (i+1) squared, running
+      0xc8b2 to 0xe1b2 - which is exactly where g_PolyArgs begins, so
+      the length is confirmed by what follows it. The 0xc80 the
+      search starts from is the midpoint of that, not its size.
+
+      THE SQUARES ARE THE ONLY MULTIPLIES. After this one loop, every
+      distance in the demo comes out of the table.
+
+      AND IT IS NOT A STARTUP LOOP. The same 0x1900 bytes are the
+      rasteriser's span buffer - ../subsystems/raster.txt section 6.4
+      - so any polygon drawn destroys the squares. That is why the
+      script rebuilds the table twice, each time immediately before a
+      batch of texture generation.
+
+   6.2.  The three generators
+
+      All three walk g_TexX and g_TexY DOWN from their size while DI
+      runs UP, so a centre written as c appears at pixel size - c.
+      Anything reimplementing them has to mirror.
+
+      +---------------------+-------+----------+-----------------------+
+      | Routine             | Size  | Into     | Value                 |
+      +=====================+=======+==========+=======================+
+      | Tex_BuildThreeGlows | 256   | 0x5ad2   | three discs,          |
+      | 1000:5721           |       |          | 0x3f - d, radius 0x3f |
+      +---------------------+-------+----------+-----------------------+
+      | Tex_BuildGlowNoise  | 256   | 0x5ad2   | 0x104 - d/16 - d/64,  |
+      | 1000:57e1           |       |          | plus noise, clamped   |
+      +---------------------+-------+----------+-----------------------+
+      | Flare_BuildSprite   | 160   | 0x7ad2   | 0xff - d/4 - d/8      |
+      | 1000:5363           |       |          |                       |
+      +---------------------+-------+----------+-----------------------+
+
+      THE FALLOFFS ARE SHIFTS, NOT DIVIDES, and two of the three start
+      ABOVE full white - so the middle of a glow saturates into a flat
+      core and only the skirt is a gradient.
+
+      Tex_AddGlow at 1000:5786 is the per-disc helper the first one
+      calls three times a pixel, at (0x40,0x70), (0xb0,0xc0) and
+      (0xc0,0x40). It returns on |dx| >= 0x3f or |dy| >= 0x3f BEFORE
+      taking the root, so a pixel outside the disc costs one compare -
+      which is what makes three glows over 65,536 pixels affordable.
+      Its 0x3f is one palette band exactly, so a disc never bleeds
+      into the next band.
+
+      Tex_BuildGlowNoise adds its grain AFTER the range test, so the
+      noise clips away inside the saturated core and shows only in the
+      skirt.
+
+      FLARE_BUILDSPRITE IS THE ODD ONE: its cone is not sampled as
+      colour at all. Flare_ClipSetup CROPS it - the source for an
+      element of radius r starts at (0x50-r, 0x50-r) in the 160-wide
+      buffer - so because the cone is linear, one sprite serves every
+      flare size with no scaling. effects/sky.txt section 6.
+
+      It shares segment 0x7ad2 with the bump map's height field, and
+      that is reuse rather than a shared purpose: the bump scene
+      builds its own field by stamping dust.
+
+   6.3.  Tex_SnapshotFrame
+
+      1000:2496 is a fourth way to fill 0x5ad2 and it computes
+      nothing: it renders a single frame into 0x4ad2 and REP MOVSDs
+      64,000 bytes across. The main script runs it immediately before
+      Scene_Shatter, so it is what decides what shatters.
+
+      It is not a scene. There is no loop in it.
+
+   6.4.  One segment, four tenants
+
+      0x5ad2 IS NOT "THE GLOW TEXTURE" - it is whichever of four
+      things last filled it, and the scene running decides which:
+
+      +-----------------------+-------------------------------------+
+      | Tex_BuildGlowNoise    | the flyover's and the battle's      |
+      |                       | terrain, and the tower fall's       |
+      | Tex_BuildThreeGlows   | the bump scene's lighting picture   |
+      | Tex_SnapshotFrom      | the frame the glass breaks out of   |
+      | Tex_SnapshotFrame     | the frame the glass assembles into  |
+      +-----------------------+-------------------------------------+
+
+      THE MAIN SCRIPT REBUILDS IT BETWEEN SCENES RATHER THAN KEEPING
+      COPIES, which is why Tex_BuildGlowNoise is called twice -
+      1000:02c3 and 1000:032d - with the bump scene's picture and two
+      snapshots in between. A reconstruction with a buffer per
+      purpose must rebuild at the same points or it will draw a scene
+      with the tenant before last.
+
+7.  Pal_Animate, the colour cycling
+
+   1000:6d49 rebuilds g_PalMain every time it is called.
+
+       g_PalPhaseR += 0xd
+       g_PalPhaseG += 0x10
+       g_PalPhaseB += 0x15
+
+   Three phases advancing at 13, 16 and 21 units of 2048 - coprime
+   enough that the hue wanders a long way before repeating. Each
+   indexes g_SinTable, and the sample becomes a per-channel SLOPE:
+
+       slope = ((sin(phase) >> 6) + 0x40) << g_PalRampShift
+
+   Then one 16-bit accumulator per channel is stepped by its slope and
+   THE HIGH BYTE IS THE DAC VALUE, clamped at 0x3f. So each channel is
+   a linear ramp from black whose steepness is animated, and what
+   cycles is the colour the ramp climbs toward.
+
+   IT FILLS 128 ENTRIES, from 0x96be to 0x983e, then writes black into
+   entry 128. Entries 129 to 255 are not touched and nothing found yet
+   writes them - so under this palette the top half is black and only
+   band offsets 0x00 and 0x40 land anywhere visible.
+
+   g_PalRampShift at img 0x8fe1 ships as 0, and four scene routines
+   write it - 1000:078e, 1000:09b7, 1000:13d5 and 1000:1534 - so a
+   scene can steepen every ramp at once.
+
+8.  The two stored palettes
+
+   Demo_Main selects a palette by writing its address into
+   g_PalSource. Three addresses appear, 0x300 apart:
+
+   +----------+-------------+------------------------------------------+
+   | g_PalMain| img 0x96be  | ZERO IN THE IMAGE - Pal_Animate builds   |
+   |          |             | it. Selected at 1000:01f7 and 1000:027f  |
+   | g_Pal1   | img 0x99be  | stored. Selected at 1000:02fe            |
+   | g_Pal2   | img 0x9cbe  | stored. Selected at 1000:0353            |
+   +----------+-------------+------------------------------------------+
+
+   BOTH STORED PALETTES ARE FOUR 64-ENTRY RISING RAMPS [verified by
+   inspection], which is exactly what the band offsets need.
+
+   g_Pal1 is four identical greyscale ramps, every band 0 to 0x3f in
+   all three channels.
+
+   g_Pal2 has four different ramps:
+
+       band 0   entries   0..63   R 0..16   G 0..36   B 0..36
+       band 1   entries  64..127  R 17..53  G 36..63  B 37..63
+       band 2   entries 128..191  R 0..51   G 0..61   B 0..62
+       band 3   entries 192..255  R 0..53   G 0..63   B 0..63
+
+   BANDS 0 AND 1 ARE BLUE AND CYAN DOMINANT - red reaches 16 where
+   green and blue reach 36. That is the cyan surface
+   effects/scenes.txt scene 9 describes, and which band a face lands
+   in is decided by its attribute, so one palette gives the surface
+   and the tower different colours.
+
+   A FOURTH PALETTE at img 0x9e71 is selected at 1000:03b3, for the
+   final scene. It is not 0x300 from the other three, and exactly ONE
+   of its 768 bytes exceeds 0x3f - which Pal_Upload clamps - so it is
+   a DAC palette like the rest, just not on the same stride.
+
+9.  Open questions
+
+   o What fills palette entries 129 to 255 when g_PalMain is in use.
+     Under Pal_Animate alone they are black.
+
+   o The other two texture segments. 0x7ad2 holds the 128x128 planar
+     map and 0x5ad2 is the one whose presence triggers the planar
+     pass; nothing found yet writes either. raster.txt section 3.3.
+
+   o Whether anything calls Tex_BuildSphereMap a second time with
+     different parameters. Demo_Main calls it once, and the demo shows
+     chrome in several scenes that look different - but a different
+     palette would account for that on its own.
+
+   o 0x9e71, section 7.
+
+   o What 1000:52dd reseeds the generator FOR. It runs after the map
+     is built, so something later wants different random numbers.

@@ -1,0 +1,272 @@
+PCDEMOS 64k                                            Analysis Note
+
+
+                   EXCURSION: THE CAR, AND ITS PHYSICS
+
+
+Abstract
+
+   The mode 0x18 animation handler at img 0x19a0 - 554 bytes, and the
+   most elaborate thing in the demo that is not a renderer.
+
+   A VEHICLE MODEL WITH FOUR TERRAIN PROBES A TICK: it steers off a
+   sine, accelerates without limit, falls under gravity, bounces when
+   it lands, and takes its pitch from the slope along the body and its
+   roll from the cross-slope. The camera orbits it.
+
+   Its part is sync 0x3a, whose runner is Car_Run at 1000:23fe. The
+   car is the only thing in that scene that moves: the craft beside it
+   is parked and the flag is a fixed landmark.
+
+Table of Contents
+
+   1. The order of a tick
+   2. Steering and drive
+   3. Gravity, and the bounce
+   4. Pitch and roll from the terrain
+   5. The camera and the fade
+      5.1. The tail at img 0x1faa, and how the camera clears a hill
+   6. What does not move
+   7. The transcription
+   8. Open questions
+
+1.  The order of a tick
+
+   Reached from g_AnimDispatch at cs:0x982d index 0x18 - see
+   subsystems/animation.txt. Eight steps, in this order [verified]:
+
+       img 19a0   steer: g_Obj2Yaw += sin(g_CarSteerPhase) >> 0xb,
+                  which with a 0xfff table peak is AT MOST ONE UNIT a
+                  tick - a quarter of one of the 512 angle steps
+       img 19be   ease pitch and roll toward their targets, >> 4
+       img 19e0   g_CarSpeed++, then drive along the heading
+       img 1a1d   gravity, the ground test and the bounce
+       img 1a65   the pitch target, from fore and aft probes
+       img 1ae3   the roll target, from lateral probes
+       img 1b61   the camera orbit
+       img 1ba0   the fade schedule, then jmp img 0x1faa
+
+   The targets are computed AFTER the easing that consumes them, so
+   every attitude change lands one tick late. That is not a bug worth
+   noting anywhere but here: a tick at g_Speed = 100 Hz is 10 ms.
+
+2.  Steering and drive
+
+   BOTH INPUTS START FROM A KNOWN PLACE [verified]. The part sets
+   g_CarSteerPhase to 0x200 at img 0x51e2, and g_CarSpeed is 0 by
+   static with mode 0x18 its only reader or writer - img 0x19e0 and
+   img 0x19e6 are the whole of its use - so the car always begins
+   stationary at the same point on the S-curve.
+
+   THE STEERING IS A SINE AND NOTHING ELSE [verified]:
+
+       img 19a0   bx = g_CarSteerPhase & 0x7fc
+                  g_Obj2Yaw += g_SinTable[bx] >> 0xb
+       img 19b8   g_CarSteerPhase += 2
+
+   So the car weaves along a fixed S-curve. There is no path, no
+   waypoint list and no target - the route is one sine and the terrain
+   decides what the car does about it.
+
+   The drive, img 0x19e0 [verified]:
+
+       g_CarSpeed++
+       bx = g_Obj2Yaw & 0x7fc
+       g_CarX += (sin(bx) * g_CarSpeed) >> 0xb
+       g_CarZ -= (cos(bx) * g_CarSpeed) >> 0xb
+
+   G_CARSPEED IS INCREMENTED EVERY TICK WITH NO CEILING, so the car
+   accelerates for the whole part and is travelling fastest when the
+   scene cuts. Nothing clamps it and nothing reads it but these two
+   lines.
+
+3.  Gravity, and the bounce
+
+   Four lines of physics that do more than they look like, img 0x1a1d
+   to 0x1a64 [verified]:
+
+       g_CarVelY--                              gravity, one a tick
+       ground = Terrain_HeightAt(g_CarX, g_CarZ)
+       if g_CarY <= ground:
+           g_CarVelY += (ground - g_CarY) >> 3
+           g_CarY = ground
+       g_CarY += g_CarVelY >> 1
+
+   THE PENETRATION DEPTH BECOMES UPWARD VELOCITY. Landing hard sinks
+   the car further below the ground in the tick before the test, so
+   the correction is larger and the car leaves the ground faster - a
+   spring whose stiffness is one eighth, written in two instructions.
+   It is why the car hops over bumps instead of sliding along them.
+
+   The snap to ground happens as well as the impulse, not instead of
+   it, so the car never renders below the terrain.
+
+   Terrain_HeightAt is called with BP = 0, which is the mode where
+   water REPLACES the land height - see subsystems/voxel notes in
+   effects/voxel.txt. So the car floats on the water surface rather
+   than sinking to the bed.
+
+4.  Pitch and roll from the terrain
+
+   Two probe pairs, three more Terrain_HeightAt calls, and the
+   difference between the two pairs is the whole trick [verified]:
+
+   +---------+----------------------+-------+------------+-------------+
+   | Target  | g_ProbeDx, g_ProbeDz | Shift | Reach      | Diff >>     |
+   +=========+======================+=======+============+=============+
+   | pitch   | sin, cos of yaw      | << 3  | 8 cells    | 3           |
+   | 993b    | img 0x1a6e           |       |            |             |
+   +---------+----------------------+-------+------------+-------------+
+   | roll    | COS, SIN of yaw      | << 2  | 4 cells    | 2           |
+   | 993d    | img 0x1aec - SWAPPED |       |            |             |
+   +---------+----------------------+-------+------------+-------------+
+
+   g_SinTable peaks at 0xfff, so << 3 is 8 * 0x1000 of world space and
+   a terrain cell IS 0x1000 - Terrain_HeightAt indexes with
+   (x >> 12) & 0xff. The reaches are therefore 8 and 4 CELLS, which is
+   a large vehicle on a 256x256 field.
+
+   THE SIN AND COS ARE SWAPPED FOR THE ROLL PROBE, and that swap is
+   the 90 degree turn that makes it the lateral axis. Nothing else
+   distinguishes the two blocks; they are otherwise the same code
+   twice.
+
+   THE TWO REACHES DIFFER - 8 cells along the body against 4 across
+   it - so the model has a wheelbase twice its track, which is the
+   right way round for a car.
+
+       pitch:  probe (x - dx, z + dz) and (x + dx, z - dz)
+       roll:   probe (x - dx, z - dz) and (x + dx, z + dz)
+
+   Both differences are clamped to +/-0x1e0, img 0x1acc and 0x1b4a, so
+   a cliff cannot throw the car past about 43 degrees of a 512-step
+   turn.
+
+   Section 1's note applies: these targets are written after the ease
+   that reads them, so the attitude trails the ground by one tick.
+
+5.  The camera and the fade
+
+       img 1b61   g_CamAngleNext += 2
+       img 1b67   g_9360 = g_CarX - 16 * sin(g_CamAngleNext)
+                  g_9364 = g_CarZ - 16 * cos(g_CamAngleNext)
+
+   SO THE CAMERA CIRCLES THE CAR at radius 16 while the car drives -
+   the only camera in the demo that tracks a moving object rather than
+   flying its own path.
+
+   The fade, img 0x1ba0 [verified]: once g_MusicPos reaches 0x39 the
+   level climbs 0x14 a tick, a slow fade out one position before the
+   part's own target of 0x3a. Otherwise, if a fade is still in
+   progress, it climbs 0x78 a tick to finish it.
+
+5.1.  The tail at img 0x1faa, and how the camera clears a hill
+
+   Mode 0x18 leaves through img 0x1faa and mode 2 CALLS it at img
+   0x0e70, so the two share it [verified]. Leaving it out is what
+   makes a reconstruction's camera sit at one level and let hills ride
+   up through the view.
+
+   IT PROBES THE TERRAIN TWICE MORE, which is why the car's handler
+   costs six Terrain_HeightAt calls a tick rather than four.
+
+   The first probe is EIGHT UNITS AHEAD along the camera's own
+   bearing, img 0x1fb3, and it does not move the camera at all:
+
+       d  = ground_ahead + 0x384 - g_CamScaleNext - cs:0x98f7
+       cs:0x98f7 += d >> 3
+       g_SkyBias  = cs:0x98f7 >> 4
+       cs:0x9450  = g_SkyBias * 320
+
+   So the view PITCHES to meet a rise before the camera reaches it,
+   through the sky bias and the voxel's y offset. img 0x2001 builds
+   that 320 as x << 6 plus x << 8 rather than multiplying.
+
+   The second probe is UNDER the camera, img 0x2074, and that one is
+   the floor:
+
+       if the probe is not water:
+           g_CamScaleNext = max(g_CamScaleNext, ground + 0x1c2)
+           cs:0x9873      = max(cs:0x9873,      ground + 0x384)
+
+   THE HEIGHT ITSELF RIDES A TWO-STAGE SUSPENSION. cs:0x9875 is the
+   target, floored at 0x1f4; cs:0x9873 steps toward it by 0x80 a tick
+   without overshooting; and g_CamScaleNext eases onto cs:0x9873 by a
+   sixteenth at img 0x20ae. The part seeds all three from one probe at
+   img 0x51d6 and the tail pulls them apart from there.
+
+   Every compare in the suspension is UNSIGNED and the final ease is
+   signed - reading them alike puts the camera underground the first
+   time a height crosses 0x8000.
+
+   The tail also carries the water scroll: img 0x2015 advances
+   cs:0x997b once every third tick through the shared divider.
+
+6.  What does not move
+
+   Car_Run draws three objects and two of them are static [verified]:
+
+   o THE CRAFT. g_ShipX/Y/Z and g_ShipPitch/Yaw/Roll are written once
+     each by Demo_Timeline, img 0x5003 and 0x5036, and no handler
+     touches them. It is parked for the whole part.
+
+   o THE FLAG, model 0x5be7, at g_ShipX/Z less 0x5200 and 0xb800 with
+     a fixed orientation - effects/battle.txt section 4.
+
+   What moves is the car and the camera. The scene reads as motion
+   because the camera orbits and the terrain streams past.
+
+   g_Obj2Pitch, g_Obj2Yaw and g_Obj2Roll ARE SHARED with craft B of
+   the battle - Battle_DrawCraftB reads the same triple at img 0x270c.
+   The car steers through object slot 2's angles. Two parts, one slot,
+   never both at once; the same economy as the Lissajous phases in
+   effects/battle.txt section 8.3.
+
+7.  The transcription
+
+   src/xcursion/xcursion_demo.c has anim_tick24 and scene_car, and it
+   reproduces the demo exactly: at 67 ticks into the part the car is
+   at x -795766, y 184, z 205647 in both, with the same speed
+   [observed].
+
+   sim/xcursion/parts.py has car_tick, and sim/xcursion/demo.py part 16 is the
+   car over the terrain. The whole model is the demo's - the sine
+   steering, the acceleration, the spring, both probe pairs with their
+   different reaches, the clamps and the camera orbit.
+
+   The initial g_CarX/Y/Z and the terrain seed are the demo's too, from
+   Demo_Timeline img 0x5003 onward and img 0x51ba.
+
+8.  Open questions
+
+   o g_9384 is g_CarVelY here. Whether anything else uses that word is
+     not checked, and the demo has form for sharing slots - see
+     section 6.
+
+   o The camera's bearing arrives about 76 of the sine table's 2048
+     steps short of the demo's, while its HEIGHT is exact at 1077 and
+     the landing matches to the tick - both consume 179 bytes of
+     flight track [observed].
+
+     IT IS NOT THE INTEGRATION. Against the opening, src/ and the
+     demo both reach bearing 262 after exactly 92 ticks of mode 0
+     [observed]. What differs is where the MUSIC is at that moment:
+     the demo is on row 6 and src/ on row 7, because the demo's
+     parts spend ticks in their own setup - a generate, a shade
+     build - while src/'s entries cost nothing. Thirteen ticks at
+     the opening alone, and every part adds its own.
+
+     THAT MEASUREMENT WAS TAKEN THROUGH A SEEK, and a seek is not the
+     demo. Played straight through, the bearing at the approach's
+     first row is 64934 against the demo's 64924, and by row three
+     64798 against 64796 - with g_9460 and g_CamScaleNext EXACT at
+     2728 and 3068 [verified, against slots 1 and 2]. The mode 2
+     bearing step is -4 a tick at img 0x0f2c and the port's delta
+     across the part matches the demo's -128 exactly.
+
+     What drifted was the SEEK, and the cause was a counter the
+     restart did not clear: Xcur_CamStep's three phases at img
+     0x98f9, 0x98fb and 0x98fd are zero by static and only ever
+     climb, so every replay flew the opening from where the last one
+     left off and the error grew with each jump. Clearing them puts
+     a seek within a tick of playing straight through.

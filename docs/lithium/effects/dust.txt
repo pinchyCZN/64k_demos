@@ -1,0 +1,307 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                    LITHIUM: THE DUST PARTICLES
+
+
+Abstract
+
+   A pool of ONE THOUSAND particles that SPELL "VOTE" IN RIPPLES -
+   the mask they chase is that word drawn by the credit roll's own
+   text routine, ./bump.txt section 7.
+   The target of each is drawn by rejection sampling the lit pixels of
+   a line of text, and the text is "VOTE" - rendered into the mask
+   buffer by the scene runner itself, not by anything the particle
+   code knows about.
+
+   THE PARTICLES ARE NEVER DRAWN AS PIXELS. Each stamps an 8x8 brush
+   into a height field, and a bump mapper turns that field into a
+   refracted image - effects/bump.txt. So the word appears as a
+   disturbance in a surface rather than as a cloud of dots.
+
+   A particle has no velocity. It carries THREE POINTS and chases
+   them in series: the drawn point eases toward a middle point, the
+   middle point eases toward the target. That chain is what gives the
+   cloud its lag.
+
+   All [verified] from the four routines unless marked.
+   effects/text.txt is the renderer whose output it samples.
+
+Table of Contents
+
+   1. The pool
+   2. Tick_Dust, the mover
+   3. Dust_ResetFromPoint
+   4. Dust_SampleMask
+      4.1. The sampler MAGNIFIES
+   5. Where the mask comes from
+   6. g_DustPhase does two jobs
+   7. What becomes of them
+   8. Open questions
+
+1.  The pool
+
+   1000 records of 0xc bytes at 0x2ad2:0x3820, so 12,000 bytes ending
+   at 0x6700. Lith_DustParticle:
+
+       +0x00  short[2]  drawn x, y       what is on screen
+       +0x04  short[2]  mid x, y         an intermediate
+       +0x08  short[2]  target x, y      where it is heading
+
+   THE BOUND IS THE PROOF. Tick_Dust walks from 0x3820 until SI
+   reaches 0x6700, stepping 0xc, which is exactly 1000 records - and
+   0x6700 is where the text mask begins, so the pool ends where the
+   mask starts.
+
+2.  Tick_Dust, the mover
+
+   1000:6a23.
+
+       DS = 0x2ad2, SI = 0x3820, CL = g_DustJitterShift
+       per record:
+           Rnd_Next -> ax, dx;  ax >>= cl;  dx >>= cl
+           ax += target_x;  dx += target_y
+           if maybe_g_DustSnapY > mid_y:  target_y = 0x6480
+           mid   += ((jittered target) - mid) >> 3
+           drawn += (mid - drawn) >> 5
+           si += 0xc
+
+   A TWO-STAGE EASE, NOT A VELOCITY. Only the target is ever set from
+   outside; the other two points chase. The drawn point lags the mid
+   point by a 32nd and the mid point lags the target by an eighth, so
+   a particle accelerates away and settles without any integration -
+   the same shift-and-add idiom as the palette fades and the flight
+   model, chained twice.
+
+   THE CHAIN IS SLOW, AND THAT SETS THE SCENE'S PACE. A 32nd of an
+   8th is a 256th, so a particle needs ABOUT 200 TICKS to arrive -
+   measured by transcription: from the launch point to a target
+   across the screen, the mean error reaches zero at roughly that
+   many. The refill cannot come faster than the cloud can settle or
+   the word never forms at all, which puts a floor under the music
+   interval Tick_Dust gates on.
+
+   The jitter is applied to the TARGET, not the position, so it never
+   accumulates: a particle wanders around its destination instead of
+   drifting off it.
+
+   THE SECOND EASE READS THE FIRST ONE'S RESULT. 1000:6aaf stores the
+   mid point before 1000:6aba reads it back for the drawn position,
+   so the two stages are chained inside a tick rather than both
+   working from the tick's opening snapshot.
+
+   THE MOVER IS BYTE-EXACT against the emulator over all 12,000
+   bytes of the pool, with the generator seeded from its own state
+   at 1000:6a82 - the pair matters, since Rnd_Next's AX and DX are
+   both used and calling it twice is not the same thing [verified].
+   Ported as Lith_DustTick, src/lithium/lithium_dust.c.
+
+   Then, once per music position change:
+
+       if g_DustPhase == 1:  Dust_ResetFromPoint
+       else:                 Dust_SampleMask
+       g_DustPhase--
+       g_DustJitterShift = (g_DustJitterShift + 1) & 7
+       if g_DustPhase == 0xfc:  g_DustPhase = 0xc
+       if g_DustPhase == 7:     g_DustPhase = 1
+
+   So the two fill modes alternate on a counter and the jitter
+   amplitude cycles through eight shifts - the cloud tightens and
+   loosens on its own.
+
+3.  Dust_ResetFromPoint
+
+   1000:0bb5. Every particle starts at the same place:
+
+       drawn  = (0x5000, 0x3200)
+       mid    = Rnd_Next
+       target = Rnd_Next
+
+   One launch point and two random points is a burst that scatters.
+
+4.  Dust_SampleMask
+
+   1000:0be1. The same pool, its TARGETS filled by rejection sampling
+   a bitmap, 1000 accepted:
+
+       retry:
+         Rnd_Next -> (ax, dx);  dx >>= 1
+         bp = ax, di = dx
+         reject if bp >= 0xa000 or di >= 0x6400
+         di -= 0x3200
+         bp >>= 0xa
+         di >>= g_DustPhase
+         di += 0xa
+         bx = bp + di*0x40 + di*0x100          ie. di*320 + bp
+         reject if bx >= 0x1900
+         reject if ES:[bx + 0x6700] == 0
+         reject if ES:[bx + 0x66ff] == 0
+       accept: target_x, target_y = ax, dx
+
+   bx = di*320 + bp IS A SCREEN ADDRESS and the bound 0x1900 is 6400,
+   which is TWENTY ROWS OF 320. Twenty rows is exactly one glyph's
+   height - text.txt section 3 - so the mask is a single rendered
+   line of text and the particles settle on its letters.
+
+   THE MASK BUFFER IS CLEARED FIRST. maybe_Scene_BumpShatter zeroes
+   0x2ad2:0x6700 for 0x640 dwords at img 0x0680, then sets
+   g_TextPenX to 0x6700 and calls Text_DrawStringAt with DL = 0 on
+   the string at 1000:92eb, which is "VOTE" and nothing else.
+
+   SO THE GLYPH COUNTERS STAY ZERO AND ARE REJECTED. Drawn on a
+   cleared buffer the 0x1f outline floors to zero - ../effects/
+   text.txt section 5.3 - so only the 0x0f ink marks the mask and
+   the holes in O and E survive magnification.
+
+   IT TESTS TWO ADJACENT BYTES, +0x6700 and +0x66ff, so a particle
+   needs both its pixel and the one to its left lit. That keeps the
+   cloud off single-pixel edges, where a particle would look detached
+   from the letter.
+
+   THE TWO AXES ARE NOT STORED ALIKE, and that is the trap. 1000:0bef
+   halves DX before anything else touches it, and 1000:0c3a stores
+   THAT as the target y, while 1000:0c36 stores AX untouched:
+
+       target x = ax                   the raw word
+       target y = dx >> 1              img 0x0bef
+
+   The halving is not merely the bound test's business - it is in the
+   value the particle chases. Storing the unhalved word doubles every
+   target y, so with the stamp's seven fractional bits a particle
+   settles at screen row dx >> 7 instead of dx >> 8: the word forms
+   at twice the depth and most of the cloud lands below the bottom
+   edge. Byte-exact against the emulator over all 12,000 bytes of the
+   pool, seeded from the generator's state at this routine's entry
+   [verified].
+
+   4.1.  The sampler MAGNIFIES
+
+      The mask is read at a far coarser resolution than the target it
+      stores, and that is the whole reason the word is legible on a
+      320 x 200 screen.
+
+          mask column = ax >> 0xa          but  screen x = ax >> 7
+          mask row    = ((dx >> 1) - 0x3200) >> g_DustPhase, + 0xa
+
+      ONE MASK COLUMN COVERS EIGHT SCREEN COLUMNS. ax is capped at
+      0xa000, so only mask columns 0 to 39 are ever addressed - and
+      VOTE at four glyphs of ten occupies columns 2 to 40, which is
+      exactly that range stretched across the full width.
+
+      THE ROW INDEX IS THE ONE g_DustPhase SHIFTS, at the SAR of
+      img 0x0c0e, so the phase TRADES HOW MUCH OF THE GLYPH IS SHOWN
+      AGAINST HOW BIG IT IS. A big shift collapses the whole dx range
+      into a few mask rows and stretches them over all 200 screen
+      rows; a small one admits every row but confines the word to a
+      band in the middle. The ink occupies 14 of the cell's 20 rows:
+
+          +---------------+-------------+------------+-------------+
+          | g_DustPhase   | glyph rows  | screen     | reads as    |
+          |               | shown of 14 | height     |             |
+          +===============+=============+============+=============+
+          | 0xff .. 0xfd  |      2      |  99%       | bars        |
+          | 0x0c          |      8      |  99%       | big, cropped|
+          | 0x0b          |     13      |  97%       | THE WORD    |
+          | 0x0a          |     14      |  55%       | half size   |
+          | 0x09          |     14      |  27%       |             |
+          | 0x08          |     14      |  13%       |             |
+          +---------------+-------------+------------+-------------+
+
+      THE SAR IS SIGNED AND THAT IS WHAT CENTRES THE WORD. di is
+      dx - 0x3200, so it straddles zero; rows above centre arrive
+      negative, and at a small shift they fall below 0 or past 19 and
+      are rejected by the bx < 0x1900 bound - which is why the band
+      closes in on the middle of the screen as the phase drops.
+
+      SO THE WORD IS DRAWN AT TWO USABLE SIZES, 0x0b nearly full
+      height and 0x0a about half, and the cycle in section 5 reaches
+      them in that order.
+
+      The horizontal magnification is fixed at eight, so a glyph is
+      about 96 screen columns wide whatever the phase. At 0x08 to
+      0x0a the twenty mask rows become 200 screen rows and the
+      proportions are right; at 0xff the two reachable rows are each
+      a hundred rows tall and the same word is unreadable bars.
+
+      SO THE WORD APPEARS AT TWO SIZES IN ONE SCENE, and the cycle
+      in section 5 is what walks between them - the burst wipes the
+      cloud, the next phase re-samples it at a different scale, and
+      the letters reform larger or smaller.
+
+      TRANSCRIBING IT AND LETTING THE CLOUD SETTLE AT PHASE 0x0a
+      GIVES LEGIBLE GLYPHS, so the magnification is right.
+
+      A BURST WIPES IT. Dust_ResetFromPoint sets every target to a
+      fresh random pair, not to a mask position, so the cloud goes
+      uniform and has to be re-sampled and re-settled before the
+      letters return.
+
+      PHASE 4 IS OUTSIDE THE MASK ENTIRELY - the window lands past
+      the end and almost nothing is accepted.
+
+   It writes ONLY the target. The drawn and mid points keep whatever
+   they held, which is why a re-sample moves the cloud rather than
+   teleporting it.
+
+5.  Where the mask comes from
+
+   maybe_Scene_BumpShatter at 1000:0665, before anything else it does:
+
+       Mem_ClearSegment 0x7ad2 and 0x4ad2
+       zero 0x2ad2:0x6700 for 0x640 dwords        6400 = 320 x 20
+       g_TextPenX = 0x6700
+       BX = 0x92eb, AX = 0x2ad2, Text_DrawStringAt
+       ... Dust_ResetFromPoint ...
+
+   g_TextPenX IS A RAW DESTINATION OFFSET, not a pen x.
+   Text_DrawStringAt loads DI straight from it and adds 10 a glyph,
+   so setting it to 0x6700 and passing segment 0x2ad2 puts the text
+   exactly where Dust_SampleMask reads. No copy is involved and the
+   renderer needs no second mode.
+
+   The string at 1000:92eb is "VOTE" [verified], so THE PARTICLES
+   SPELL VOTE.
+
+   AND IT IS THE ONLY ONE. g_TextPenX is written in six places:
+   1000:068b points it at the mask, and the rest - 1000:1b66, 1b78,
+   1b94, 1ba9 and 69ba - point it into the back buffer for the credit
+   roll and the greetings. No other string ever reaches 0x6700, so
+   VOTE is the only word the height field ever carries.
+
+6.  g_DustPhase does two jobs
+
+   1000:8ff7 is both the mode counter of section 2 and the shift
+   count of section 4 - SAR DI, CL at 1000:0c0e.
+
+   SO THE SAMPLED BAND STRETCHES AS THE COUNTER RUNS DOWN. The height
+   of the text band the particles settle on is not a setting; it is a
+   side effect of how far through the mode cycle the effect has got.
+
+7.  What becomes of them
+
+   maybe_Scene_BumpShatter, every frame, at 1000:0806:
+
+       DS = 0x7ad2, ES = 0x2ad2, SI = 0x3820
+       per particle:
+           bx = (drawn_y >> 7)*320 + (drawn_x >> 7)
+           add an 8x8 brush into [bx], EACH BYTE SATURATING at 0xff
+
+   SEVEN FRACTIONAL BITS, which Dust_ResetFromPoint confirms: its
+   launch point 0x5000, 0x3200 shifts down to 160, 100, the centre of
+   the screen.
+
+   The field is then relaxed and refracted - effects/bump.txt
+   sections 3 and 4 - and Vec_Ease2D at 1000:6244, which Tick_Dust
+   calls every frame, is what moves the light the refraction samples
+   with.
+
+8.  Open questions
+
+   o maybe_g_DustSnapY at 1000:8fe8. The comparison at 1000:6a95 is
+     UNSIGNED - JBE, not JLE - and the write at 1000:6a9c lands on
+     the TARGET after the jittered one has already been taken from
+     it, so a snap takes effect on the NEXT tick. It reads zero
+     through the bump phase, which with an unsigned test never
+     snaps [verified]. When it exceeds a particle's
+     mid_y the target_y is slammed to 0x6480, which is a floor or a
+     reset, but what sets it is not known.

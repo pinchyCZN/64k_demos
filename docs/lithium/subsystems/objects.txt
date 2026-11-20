@@ -1,0 +1,239 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                  LITHIUM: THE PER-SLOT PARAMETER BANK
+
+
+Abstract
+
+   How Lithium holds the state of the camera and of every object in a
+   scene. NOT as an array of structs - as A BANK OF PARALLEL ARRAYS,
+   one array per field, each indexed by SI = SLOT TIMES FOUR.
+
+   Four routines index it and nothing else does. Every other routine
+   in the demo reads SLOT 0 by addressing an array base with no index
+   at all, which is exactly why several of these globals were first
+   named as though they were scalars.
+
+   All [verified] from the four routines unless marked.
+
+Table of Contents
+
+   1. The trap this document exists for
+   2. The routines
+   3. The arrays
+      3.1. The geometry, which Obj_Reset pins down
+      3.2. Live, target and home
+   4. What a scene does with it
+   5. Open questions
+
+1.  The trap this document exists for
+
+   READING AN ARRAY BASE AS A SCALAR IS CORRECT ONLY FOR SLOT 0, AND
+   IT LOOKS CORRECT EVERYWHERE.
+
+   Scene_ProjectVerts reads 1000:8a6f, 1000:8a9d and 1000:8acb as the
+   camera's three rotation angles. Mesh_Transform reads 1000:88e9 and
+   1000:8921 as a world offset. Both readings are right about the
+   arithmetic and wrong about the type: those five addresses are array
+   BASES, and the routines are reading element 0.
+
+   THE SPACING IS WHAT DISTINGUISHES THEM: the word arrays sit 0x2e
+   apart and the dword arrays 0x38 apart, which is nothing like a
+   struct and exactly like a bank of equal-length arrays. A scalar
+   name on one of these bases - g_CamAngleX for 1000:8a6f, say - is
+   wrong about the type even when it is right about the arithmetic.
+
+   So: BEFORE NAMING A GLOBAL IN THIS RANGE, check whether anything
+   indexes it. 1000:1bdf, 1000:4f77, 1000:4fba and 1000:4ffd are the
+   only four routines that do.
+
+2.  The routines
+
+   All take the slot in SI, PRE-MULTIPLIED BY FOUR, because the
+   element stride is 4 bytes even for the word fields.
+
+   +--------------------+------------+--------------------------------+
+   | Obj_Select         | 1000:4ffd  | slot -> the scratch scalars    |
+   |                    |            | Mesh_Transform reads           |
+   | Obj_LoadOrientA    | 1000:4fba  | stored set A -> the slot       |
+   | Obj_LoadOrientB    | 1000:4f77  | stored set B -> the slot       |
+   | Obj_Reset          | 1000:1bdf  | clear the slot                 |
+   +--------------------+------------+--------------------------------+
+
+   Obj_Reset clears both stored orientations, the target and home Y,
+   three byte fields, and sets two defaults - the word at 0x8a39 to 2
+   and the dword at 0x8e46 to 0xa. IT DOES NOT TOUCH THE LIVE
+   ORIENTATION OR THE LIVE X AND Z, so the order a scene uses is
+   reset, then write home and target, then Obj_LoadOrientA or B to
+   pull home into live.
+
+   2.1.  Obj_Select
+
+          g_ObjAngleX <- g_SlotAngleX[slot]
+          g_ObjAngleY <- g_SlotAngleY[slot]
+          g_ObjAngleZ <- g_SlotAngleZ[slot]
+          g_CurPosX   <- g_SlotPosX[slot]
+          g_CurPosZ   <- g_SlotPosZ[slot]
+          g_CurPosY   <- g_SlotPosY[slot]
+
+      The six destinations are the only ones Mesh_Transform reads, so
+      a scene draws N objects as N pairs of Obj_Select then
+      Mesh_Transform. There is no object pointer and no stack frame -
+      the "current object" is six global words.
+
+   2.2.  Obj_LoadOrientA and Obj_LoadOrientB
+
+      The same routine twice over, against two different stored
+      orientation sets:
+
+          g_SlotAngleX[slot] <- g_SlotAngleAX[slot]    (or B)
+          g_SlotAngleY[slot] <- g_SlotAngleAY[slot]
+          g_SlotAngleZ[slot] <- g_SlotAngleAZ[slot]
+          g_SlotPosX[slot]   <- g_SlotHomeX[slot]
+          g_SlotPosZ[slot]   <- g_SlotHomeZ[slot]
+          g_SlotPosY[slot]   <- g_SlotHomeY[slot]
+
+      BOTH COPY THE SAME HOME POSITION. Only the orientation differs,
+      so a slot carries one live orientation and TWO stored ones, and
+      a scene reverts to whichever it wants.
+
+      1000:5526 calls B then A for slot 0, so A wins - which says the
+      two are alternatives rather than a sequence [inferred].
+
+3.  The arrays
+
+   +------------------+-----------+-------+---------------------------+
+   | Name             | Base      | Width | What                      |
+   +==================+===========+=======+===========================+
+   | g_SlotAngleX     | 1000:8a6f | word  | the LIVE orientation      |
+   | g_SlotAngleY     | 1000:8a9d | word  |                           |
+   | g_SlotAngleZ     | 1000:8acb | word  |                           |
+   | g_SlotAngleAX    | 1000:8af9 | word  | stored orientation A      |
+   | g_SlotAngleAY    | 1000:8b27 | word  |                           |
+   | g_SlotAngleAZ    | 1000:8b55 | word  |                           |
+   | g_SlotPitch      | 1000:8b83 | word  | THE FLIGHT ATTITUDE -     |
+   | g_SlotYaw        | 1000:8bb1 | word  | ../effects/flight.txt.    |
+   | g_SlotRoll       | 1000:8bdf | word  | Obj_LoadOrientB copies    |
+   |                  |           |       | these into the live set   |
+   | g_SlotPosX       | 1000:88e9 | dword | the LIVE position         |
+   | g_SlotPosZ       | 1000:8921 | dword |                           |
+   | g_SlotPosY       | 1000:8cd9 | dword |                           |
+   | g_SlotHomeX      | 1000:89c9 | dword | the stored position       |
+   | g_SlotHomeZ      | 1000:8a01 | dword |                           |
+   | g_SlotHomeY      | 1000:8d49 | dword |                           |
+   +------------------+-----------+-------+---------------------------+
+
+   3.1.  The geometry, which Obj_Reset pins down
+
+      Obj_Reset at 1000:1bdf touches the word arrays at 0x8af9, 0x8b27,
+      0x8b55, 0x8b83, 0x8bb1, 0x8bdf, 0x8c0d and 0x8c3b, which fills in
+      the 0x2e-spaced run that begins at g_SlotAngleX. So:
+
+          ELEVEN WORD ARRAYS, 1000:8a6f to 1000:8c68, 0x2e apart
+          dword arrays, 0x38 apart, in two runs:
+              1000:88e9, 8921, 8959, 8991, 89c9, 8a01, 8a39
+              1000:8c69, 8ca1, 8cd9, 8d11, 8d49
+
+      THE TWO BANKS DO NOT OVERLAP, and that is the check: the word run
+      ends at 0x8c68 and the dword run resumes at 0x8c69. The first
+      dword run ends at 0x8a39 + 0x38 = 0x8a71, two bytes past where
+      the word run starts - so the whole region 0x88e9 to 0x8d81 is one
+      contiguous bank with nothing wasted.
+
+      At a 4-byte element stride that is room for ELEVEN slots in the
+      word arrays and fourteen in the dword ones. Eleven is the binding
+      number and it is still [inferred] - no routine has been seen
+      bounding the index.
+
+      Three byte arrays also exist, at 0x8d81, 0x8e17 and 0x8e7e, which
+      Obj_Reset zeroes. They are not 0x2e or 0x38 apart, so they are
+      separate arrays rather than part of either run.
+
+   3.2.  Live, target and home
+
+      A slot's position exists THREE TIMES OVER:
+
+      +----------+-----------+-----------+-----------+-----------------+
+      |          | X         | Z         | Y         | who writes it   |
+      +==========+===========+===========+===========+=================+
+      | live     | 1000:88e9 | 1000:8921 | 1000:8cd9 | Obj_LoadOrient* |
+      | target   | 1000:8959 | 1000:8991 | 1000:8c69 | the scene       |
+      | home     | 1000:89c9 | 1000:8a01 | 1000:8d49 | the scene       |
+      +----------+-----------+-----------+-----------+-----------------+
+
+      Obj_LoadOrientA and B copy HOME into LIVE. The target set is
+      written by the scene alongside home, usually to the same value -
+      1000:18a3 sets target and home to 0x24000 and 0xa000 together for
+      slot 0 - and nothing read so far consumes it.
+
+      THE TARGET NAMES ARE [inferred] AND CARRY maybe_. Three copies of
+      a position, with the demo's universal shift-and-add easing
+      idiom, is what a live-follows-target arrangement looks like -
+      but NOTHING HAS BEEN SEEN EASING THEM.
+
+      What does consume them is Tick_Slots1 at 0x6b7f and Tick_Slots2
+      at 0x6b35, which read the target and home sets and feed them
+      through the SECOND rotation frame - Vec_RotX2, Vec_RotY2 and
+      Vec_RotZ2 on the angles at 0x8f1a, 0x8f1c and 0x8f1e. So the
+      third copy is an input to a transform rather than an easing
+      target, and the name may want revising once those handlers are
+      read. ../subsystems/timeline.txt section 4.1.
+
+   NOT ARRAYS, and this is the distinction that matters:
+
+       g_CurPosX, g_CurPosY, g_CurPosZ   1000:88d7, 88df, 88db
+       g_ObjAngleX, Y, Z                 1000:88e3, 88e5, 88e7
+
+   Those six are the scratch scalars Obj_Select fills and
+   Mesh_Transform reads, and the three g_ObjAngle* ones are ADJACENT
+   at a 2-byte stride, which is the clearest sign they are a different
+   kind of thing from the bank.
+
+4.  What a scene does with it
+
+   From 1000:5526, which is the clearest example read so far:
+
+       clear the off-screen buffer with Mem_ClearSegment
+       MOV dword ptr CS:[0x88af], 0        both pool counters at once
+       set the live orientation of slots 1, 2 and 3 to (0x800, 0, 0)
+       set the live and stored positions of several slots
+       Obj_LoadOrientB(0); Obj_LoadOrientA(0)
+       Obj_LoadOrientB(1); Obj_Select(1)
+       g_ObjFaceAttr = 0x6ad2              the sphere map
+       Mesh_Transform
+       ... then the camera, then Scene_ProjectVerts
+
+   So a scene runner is: reset, place the slots, then per object load
+   an orientation, select it, set its texture and transform it. The
+   ten scene runners are the callers of Scene_ProjectVerts -
+   ../effects/scenes.txt section 4.
+
+5.  Open questions
+
+   o THE SLOT COUNT. Eleven is inferred from the 0x2e array spacing
+     and nothing enforces it. 1000:18a3 uses four.
+
+   o g_SlotPitchAcc at 1000:8c0d and g_SlotYawAcc at 1000:8c3b are two
+     more of the eleven word arrays, accumulated by Track_Play. How
+     they reach g_SlotAngle* is not read.
+
+   o The word array at 0x8a39, which Obj_Reset sets to 2, and the
+     dword at 0x8e46, which it sets to 0xa. Defaults for something.
+
+   o Whether anything indexes g_CamPosX at 1000:8ca1 or g_CamPosZ at
+     1000:8d11. Both are read unindexed by Scene_ProjectVerts and both
+     sit 0x38 from g_SlotPosY, so by the spacing argument they are
+     probably arrays too - but nothing has been seen indexing them, so
+     their names still say Cam.
+
+   o What sets the stored orientations. Obj_LoadOrientA and B only
+     read them.
+
+   o Whether a slot has any fields beyond these fifteen. The gaps in
+     the bank suggest more arrays between the ones named here.
+
+   o This is the obvious candidate for the first Lith_ struct, except
+     that a bank of parallel arrays is not a struct - CLAUDE.md rule
+     6.1 wants the type to match the layout, and the honest type here
+     is one array per field.

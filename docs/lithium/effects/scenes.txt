@@ -1,0 +1,465 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                   LITHIUM: THE VISIBLE SEQUENCE
+
+
+Abstract
+
+   What the demo looks like, in order, and which code each scene is
+   likely to be. The sequence is [observed] - it was written down
+   while watching the demo run, not read out of the binary.
+
+   THIS DOCUMENT DECIDES WHAT TO READ NEXT. It is not evidence about
+   what the code does, and nothing in it may be implemented from.
+   CLAUDE.md rule 12: match the original's CODE, never a capture of
+   it. A colour named here is a reason to go and find the palette
+   builder, never a palette to write down.
+
+   Fourteen scenes, and four of them draw the same voxel surface.
+
+Table of Contents
+
+   1. How to read this
+   2. The sequence
+   3. What the sequence already says about the code
+   4. What to read next
+   5. The running order, and which runner is which scene
+   6. Open questions
+
+1.  How to read this
+
+   Every scene below carries two separate things, and they must not be
+   confused:
+
+   +------------+--------------------------------------------------------+
+   | Seen       | [observed]. What appeared on screen. Reliable          |
+   |            | about WHAT, unreliable about HOW - "chrome" is         |
+   |            | a look, and three techniques produce it                |
+   +------------+--------------------------------------------------------+
+   | Candidate  | [guess] unless marked otherwise. A routine or          |
+   |            | a landmark worth opening first. A wrong                |
+   |            | candidate costs one function read; a wrong             |
+   |            | name in the database misleads every read after it      |
+   +------------+--------------------------------------------------------+
+
+   Nothing in section 2 has been confirmed against the code. The
+   per-scene work is to turn a candidate into a [verified] entry in
+   ../README.txt and a document in this directory.
+
+2.  The sequence
+
+   2.1.  Scene 1 - warping chrome surface
+
+      Seen: an environment-mapped surface, chrome-looking, with the
+      surface itself warping. Palette cycling runs throughout scenes 1
+      to 3.
+
+      IT IS THE ROCK MESH AT FOUR TIMES SIZE [verified]. There is no
+      height field and no surface: maybe_Scene_RockIntro loads 0x41ea
+      at g_ObjScaleShift 0xe, close enough that only its curvature is
+      on screen, and g_EnvMapAngle spins the reflection under it.
+      ./rockintro.txt sections 2 and 4.
+
+   2.2.  Scene 2 - a chrome rock moves in
+
+      Seen: a rock with the same chrome surface enters over scene 1.
+
+      IT IS THE SAME MESH AGAIN, AT 0x10 INSTEAD OF 0xe [verified].
+      The runner draws a second copy from slot 8 once its Z falls
+      inside -0x1f4 .. 0x2cec, so what arrives is the same 130-vertex
+      model the "surface" already is - ./rockintro.txt section 2.
+      Mesh_Transform rotates each per-vertex normal into view space
+      and biases it by 0x80 to index the sphere map -
+      ../subsystems/mesh3d.txt section 5.
+
+      XCURSION solves the equivalent problem differently, in
+      maybe_Mapped_Render on a parameterised sphere rather than a mesh
+      - ../../xcursion/effects/planet.txt.
+
+   2.3.  Scene 3 - the rock leaves, VISTA appears
+
+      Seen: the rock exits and the word VISTA appears.
+
+      Candidate [verified in part]: "VISTA" is in the image, at
+      1000:90ad, in the credit table that starts at 1000:90a1 -
+      ../README.txt section 7. So this scene draws from that table
+      rather than from a bitmap.
+
+   2.4.  Scene 4 - LITHIUM zooms away
+
+      Seen: the word LITHIUM, starting close and receding to far.
+
+      Candidate: "LITHIUM" is the FIRST entry of the same table, at
+      1000:90a1 [verified]. A word that recedes is a scaled blit per
+      frame, so the scene wants whatever scales the font.
+
+   2.5.  Scene 5 - white fade into a voxel planet surface
+
+      Seen: a fade through WHITE, not black, into a voxel-like planet
+      surface with the camera sweeping over it.
+
+      Candidate [verified]: the fade is Pal_Upload at 1000:3dcc with
+      g_PalFade positive. Demo_Main stores 0x0100 into g_PalFade at
+      1000:0265, and Pal_Upload adds g_PalFade >> 2 to every DAC
+      component and clamps at 0x3f - so +256 drives every component to
+      full and the screen goes WHITE. The black fades use 0xff80 at
+      1000:024e and 0xffc0 at 1000:02ed. That is the fade mechanism
+      settled; which store belongs to which scene is not.
+
+      THE SURFACE IS NOT A VOXEL RENDERER, though it looks like one.
+      Terrain_Build at 1000:4b3c emits it as a GRID MESH rebuilt every
+      frame from a 128x128 heightmap, through the same polygon
+      pipeline as the ships - terrain.txt. It comes back in scenes 8,
+      9 and 12, and Terrain_Build is called from exactly four scene
+      runners, which is the check.
+
+      XCURSION solves the same shot the other way, with a real
+      y-buffer span fill in Ground_Render -
+      ../../xcursion/effects/ground.txt.
+
+   2.6.  Scene 6 - demo credits, lower left
+
+      Seen: credits for the demo appear in the lower left over the
+      surface.
+
+      Candidate [verified in part]: the credit records at 1000:90b9
+      onward read as alternating role and name - MUSIC / TOX,
+      MUSIC / EWACT, FONTS / JANGLER, CODE / TEO - which is exactly
+      what a credit roll needs.
+
+      The glyphs are likely the ROM 8x8 font, whose pointer
+      Demo_Main captures into g_RomFont8x8Off and g_RomFont8x8Seg at
+      1000:0110 with INT 10h AX=1130 BH=3 [verified].
+
+   2.7.  Scene 7 - stars and a sun with lens flare
+
+      Seen: a starfield and a sun with a lens-flare effect.
+
+      Sky_SunAndStars at 1000:425b and Flare_Render at 1000:4476,
+      both called every frame of maybe_Scene_SurfaceFlyover's loop -
+      effects/sky.txt. IT IS NOT A SEPARATE RUNNER. The stars and the
+      sun are drawn throughout 2.5 to 2.9 and what reads as its own
+      shot is the camera tilting up.
+
+      The flare elements do sit along the line from the sun through
+      screen centre, at multiples built from shifts and adds.
+
+   2.8.  Scene 8 - the camera chases a starship
+
+      Seen: the camera follows a starship, shaped much like
+      XCURSION's, flying low over the surface.
+
+      Candidate: the voxel surface of scene 5 plus a mesh. XCURSION
+      replays a RECORDED flight track for exactly this kind of shot -
+      ../../xcursion/effects/flight.txt - so a table of camera
+      keyframes is worth looking for before assuming a flight model.
+
+   2.9.  Scene 9 - the tower, with two ships circling
+
+      Seen: the camera rises to a large tower structure with THREE
+      RINGS, two gold starships flying around it. The planet surface
+      is light blue or cyan, the tower purple.
+
+      Candidate: the same voxel surface and mesh renderer as scenes 5
+      and 8. The three rings say the tower is one mesh with repeated
+      geometry. The model format is now known, and the largest model
+      the script loads is 664 vertices and 1,323 faces, which is the
+      only one big enough to be this - ../formats/mesh.txt section 4.
+
+      THE CYAN-AND-PURPLE PAIRING NOW HAS A MECHANISM. One sphere map
+      serves every surface, and a face attribute of 0 or 1 adds 0x40
+      or 0xc0 to each texel, moving it into a different 64-entry band
+      of the palette - ../subsystems/raster.txt section 4. So gold
+      ships against a cyan surface with a purple tower is three bands
+      of one palette, not three textures, and it is why the demo has
+      only one Pal_Upload.
+
+   2.10.  Scene 10 - bump-mapped morphing surface
+
+      Seen: a bump-mapping effect whose surface morphs. Palette
+      cycling runs through scenes 10 and 11.
+
+      Candidate: the 0x80-filled buffer again, now read as a normal
+      field. If scenes 1 and 10 share that buffer, they share a
+      renderer, and the 64 KB fill at 1000:016b is the evidence that
+      one such buffer exists at all.
+
+   2.11.  Scene 11 - a rock breaks the surface, then a tunnel
+
+      Seen: a rock enters and shatters the bump-mapped surface like
+      glass; the rock then travels down a tunnel.
+
+      Candidate: the tunnel is the strongest match in the whole
+      sequence to something already understood. XCURSION builds a
+      tunnel from two tables that together form one 16-bit texture
+      index, and its depth illusion comes from the byte truncation -
+      ../../xcursion/effects/tunnel.txt section 3.
+
+   2.12.  Scene 12 - the battle, and the tower falls
+
+      Seen: the planet surface returns with a battle - three enemy
+      craft against two gold starships. The laser blasts and
+      explosions look like XCURSION's. The tower is hit and topples
+      over with a flame effect.
+
+      SIX CRAFT IN TWO DESIGNS, three abreast each, plus six
+      tetrahedral projectiles - effects/battle.txt section 6. Eight
+      of the fourteen slots fly a recorded track of 300 entries;
+      five of those fire. TWO ARE CAMERA RIGS, never rendered,
+      orbiting in opposite directions and exchanged on every music
+      position change.
+
+      THE LASERS AND EXPLOSIONS ARE TRAIL BLOBS, not meshes:
+      Trail_Draw at 1000:26a4 renders the 64-record ring as additive
+      sprites, and maybe_Scene_TowerFall calls it at 1000:21cd -
+      effects/trail.txt. That is a different mechanism from
+      XCURSION's, which draws lasers as 8-slot meshes -
+      ../../xcursion/effects/battle.txt.
+
+      One bit of each particle's life counter decides whether it
+      falls under gravity and burns its own colour into the top
+      palette band, or drifts weightless and merely brightens what it
+      crosses.
+
+      The firing itself is the tail of Flight_Step: a tracer every
+      eighth tick, and fifty particles where it meets the terrain -
+      effects/trail.txt section 5. maybe_Scene_Battle resets EIGHT
+      slots in its prologue and draws nine objects, the terrain, the
+      sky and the flare in one loop.
+
+      THE TOWER IS ONE MESH IN ONE SLOT AND IT TOPPLES WITH THE
+      FLIGHT MODEL. Tick_TowerFall points Flight_StepRoll at it - a
+      constant 0x40 of roll a tick with nothing easing it back -
+      and winds its speed up as it goes, so there is no animation
+      and there are no keyframes. It lands when its two horizontal
+      coordinates reach a fixed grid cell, throws fifty burning
+      particles, and after three impacts the camera starts shaking.
+      effects/towerfall.txt.
+
+   2.13.  Scene 13 - greetings, with trails
+
+      The zoom is Image_BlitScaled at 1000:16d5, called from
+      maybe_Scene_Greetings at 1000:146b - the SAME routine
+      maybe_Scene_RockIntro uses for the LITHIUM title of 2.4.
+
+      Seen: shout-outs to other groups, the text zooming in and out
+      with trails behind it.
+
+      Candidate [verified in part]: the roughly thirty group names
+      from 1000:9149 onward, packed and NUL-terminated rather than
+      padded like the credits above them - ../README.txt section 7.
+
+      THE NAMES IN THAT TABLE ARE NOT ASCII. X means Y, W means X and
+      Q means W, so MUSICPLAXER is MUSICPLAYER and QE APPRECIATE is WE
+      APPRECIATE - ../README.txt section 7. Any group name containing
+      W, X or Y is unreliable until the font's glyph list is read.
+
+      Trails mean the previous frame is not cleared but faded or
+      shifted, so this scene identifies itself by what it does NOT do
+      to the framebuffer.
+
+   2.14.  Scene 14 - the running chrome man
+
+      Seen: the finale. A running man built out of chrome balls, who
+      runs from the lower left towards the upper right and towards the
+      camera.
+
+      Candidate: the same sphere mapping as scenes 1 and 2 -
+      ../subsystems/mesh3d.txt section 5 - on a set of balls whose
+      positions come from an animation table. A walk cycle is
+      keyframed, so there should be a table of joint or ball positions
+      per frame, and its size will be obvious once found.
+
+      Each ball would be one Mesh_Transform call with its own
+      g_CurPos*, which costs nothing extra: the pools are shared and
+      only grow, so a crowd of spheres is the cheap case for this
+      pipeline.
+
+3.  What the sequence already says about the code
+
+   Three things fall out of the sequence without reading anything new.
+
+   o SCENES SHARE RENDERERS, and the counting proves it. There are 15
+     sites loading 0xa000 into AX [verified], and FIVE of them are
+     inside Demo_Main itself - 1000:0248, 0279, 02a6, 0324 and 035d -
+     where the script hands the framebuffer segment to 1000:2aa1. That
+     leaves TEN inside other functions against FOURTEEN scenes, so at
+     least some scenes reuse a renderer. The voxel surface appearing in
+     scenes 5, 8, 9 and 12 is the obvious case.
+
+   o THE PALETTE IS ONE ROUTINE, NOT SEVEN. XCURSION has seven palette
+     builders; Lithium has a single OUT 0x3c8 site, inside Pal_Upload
+     [verified]. So every colour in every scene above comes from one
+     uploader reading g_PalSource with a g_PalFade bias, and the
+     per-scene colour differences are differences in g_PalSource. That
+     makes the cyan-and-purple of scene 9 and the cycling of scenes 1
+     to 3 and 10 to 11 a question about what writes g_PalSource, which
+     is a much smaller question than XCURSION's.
+
+   o THE TEXT SCENES ARE ONE TABLE. Scenes 3, 4, 6 and 13 all draw
+     strings from g_CreditTable at 1000:90a1
+     [verified that the strings are there]. Four scenes, one data
+     structure, and decoding its glyph order unblocks all four.
+
+4.  What to read next
+
+   The ENGINE is read: the timeline, the 3D pipeline, the rasteriser,
+   the texture and palette generators, the terrain, the recorded
+   tracks and the music replayer all have documents. WHAT IS LEFT IS
+   THE SIX SCENES WITH NO MECHANISM AT ALL - section 5 says which.
+
+   In this order, because each answer makes the next cheaper.
+
+   1. THE TEXT RENDERER. Four scenes need it - 2.3, 2.4, 2.6 and 2.13
+      - and all four draw from g_CreditTable, so one routine unblocks
+      them. The ROM 8x8 font pointer Demo_Main captures into
+      g_RomFont8x8{Off,Seg} is where to start.
+
+   2. EVERY ROUTINE THE SCRIPT CALLS IS NOW NAMED. 1000:040b is
+      maybe_Scene_Tunnel, 1000:10f7 is maybe_Scene_Finale,
+      1000:25a0 is maybe_Scene_Approach and 1000:5526 is
+      Tex_RenderObjectTile, which renders three objects flat into a
+      128 x 128 texture and shows the viewer nothing.
+
+      What remains open about them is WHICH SCENE each serves, not
+      what each does.
+
+   3. The remaining texture segments. 0x6ad2 is generated by
+      Tex_BuildSphereMap. 0x5ad2 holds whatever picture is current -
+      the title image, a radial texture, or a snapshotted frame -
+      and 0x7ad2 is the bump map's height field, but
+      maybe_Flare_Occlusion reads 0x7ad2 too, in a scene with no bump
+      map. subsystems/texture.txt section 6, effects/bump.txt,
+      effects/sky.txt.
+
+   4. The glyph list behind g_CreditTable, which decodes the
+      substitution ../README.txt section 7 describes.
+
+5.  The running order, and which runner is which scene
+
+   DEMO_MAIN IS A LINEAR SCRIPT AND ITS CALL ORDER IS THE RUNNING
+   ORDER [verified by disassembly]. Only three music waits are at the
+   top level; every other runner waits on the music itself.
+
+       01fe  maybe_Scene_RockIntro
+       0208  Font_Unpack
+       0245  Tex_RenderObjectTile
+       025f  Demo_RunUntil(8)
+       0262  maybe_Scene_SurfaceFlyover
+       0297  FUN_1000_503a                 a mesh load, see below
+       029a  FUN_1000_5334
+       029d  Tex_BuildThreeGlows
+       02a0  maybe_Scene_BumpShatter
+       02a3  maybe_Scene_Tunnel
+       02bd  FUN_1000_503a                 a second mesh load
+       02c0  FUN_1000_5334
+       02c3  Tex_BuildGlowNoise
+       02c6  Height_BuildCone
+       02da  Tex_RenderObjectTile          a second call
+       02dd  Tex_SnapshotFrame
+       02ea  Demo_RunUntil(0x1f)
+       030b  Scene_Shatter
+       031e  Demo_RunUntil(0x20)
+       0321  maybe_Scene_Approach
+       0336  maybe_Scene_Battle
+       0350  maybe_Scene_TowerFall
+       035a  FUN_1000_1396
+       03d1  FUN_1000_10f7
+       03ed  FUN_1000_70c8                 the shutdown path
+
+   FOUR OF THE SCRIPT'S CALLS DRAW NOTHING. 1000:029d is
+   Tex_BuildThreeGlows, 1000:02c3 is Tex_BuildGlowNoise and 1000:02c6
+   is Height_BuildCone - they fill the texture buffer and the bump
+   map's height field - and 1000:02dd is Tex_SnapshotFrame, which
+   renders one frame into the same buffer. subsystems/texture.txt
+   section 6. So the gap between the credit roll and the shatter holds
+   fewer scenes than its call count suggests.
+
+   1000:0665 DRAWS TEXT AND PARTICLES, NOT A ROCK AND A TUNNEL. Its
+   head renders the string "VOTE" into the dust mask and seeds the
+   particle pool from it - effects/dust.txt section 5 - and its body
+   drives a shatter. Which scene that is remains open: it runs at
+   0x02a0, directly after the credit roll, and no scene in section 2
+   is described as text or particles.
+
+   1000:150b COVERS THE TITLES AS WELL AS THE ROCK. It calls
+   Image_UnpackRle, which expands the full-screen logo "Vista
+   Lithium" out of the asset stream [verified by decoding it] - so
+   2.3 and 2.4, the VISTA and LITHIUM titles, belong to this runner
+   rather than to a runner of their own. effects/text.txt section 5.
+
+   THE ORDER OUTRANKS A MESH LOAD AS EVIDENCE. 1000:21eb is the only
+   runner that loads the 664-vertex tower, which suggests the shot
+   that introduces it - but it runs AFTER the battle, so it is the
+   tower being destroyed. Its tick handler cues a white flash off a
+   track position, which fits.
+
+   +---------------+----------------------------+--------------------+
+   | Runner        | Named                      | Scene              |
+   +===============+============================+====================+
+   | 1000:150b     | maybe_Scene_RockIntro      | 2.2, 2.3 and 2.4   |
+   | 1000:18a3     | maybe_Scene_SurfaceFlyover | 2.5 to 2.9         |
+   | 1000:0665     | maybe_Scene_BumpShatter    | 2.10 and 2.11      |
+   | 1000:2496     | Tex_SnapshotFrame          | not a scene        |
+   | 1000:1c4f     | maybe_Scene_Battle         | 2.12               |
+   | 1000:21eb     | maybe_Scene_TowerFall      | 2.12, the tower    |
+   |               |                            | falling            |
+   | 1000:040b     | maybe_Scene_Tunnel         | 2.11, the tunnel   |
+   | 1000:0c59     | Font_Unpack                | not a scene        |
+   | 1000:10f7     | maybe_Scene_Finale         | 2.14               |
+   | 1000:1396     | maybe_Scene_Greetings      | 2.13               |
+   | 1000:2919     | Scene_Shatter              | 2.11, the glass    |
+   | 1000:25a0     | -                          | a ship, no terrain |
+   | 1000:5526     | -                          | three chrome       |
+   |               |                            | objects, called    |
+   |               |                            | TWICE              |
+   +---------------+----------------------------+--------------------+
+
+   1000:1c4f is the battle on two independent counts: it is the only
+   runner that loads the four-vertex bolt, and its tick handler is the
+   block with eight consecutive Track_Play calls.
+
+   A TEXT SCENE NEVER CALLS Scene_ProjectVerts, so 2.3, 2.4, 2.6 and
+   2.13 are driven from runners that are not in the ten-caller set at
+   all. The greetings of 2.13 come from 1000:13db, which sets
+   g_CreditPtr and installs Tick_Greetings - text.txt section 4.
+
+   1000:1396 is the greetings on a direct reading: 1000:13db sits
+   inside it and is the only site that sets g_CreditPtr and installs
+   Tick_Greetings - text.txt section 4.
+
+   1000:10f7 is the last runner Demo_Main calls before Snd_Shutdown,
+   and Demo_Main loads FOUR MORPH KEYFRAMES of a 10-vertex shape
+   immediately before it - ../formats/mesh.txt section 4.1.
+
+   EVERY SCENE NOW HAS A MECHANISM. The last one without was 2.7,
+   and it turned out not to need a runner of its own - effects/sky.txt.
+
+   The lesson the scene list keeps teaching is that A RUNNER IS NOT A
+   SCENE. 1000:150b covers four of them, 1000:18a3 covers five, and
+   1000:0665 covers two across four phases, while four of the script's
+   calls draw nothing at all.
+
+6.  Open questions
+
+   o The scene count. Fourteen scenes are described above and the user
+     watching counted the same run once. A second viewing may split or
+     merge some, and the boundaries between scenes 1 to 3 and between
+     10 and 11 are the least certain because the transitions are
+     continuous.
+
+   o Whether the chrome of scenes 1, 2 and 14 is one technique or
+     three. "Chrome" is a look. An environment map, a phong lookup and
+     a plain reflection table all produce it.
+
+   o Whether scene 11's tunnel is entered by the rock or merely
+     cross-faded to. The description says the rock goes through it,
+     which would make the two one scene with a shared camera.
+
+   o How the tower topples.
+
+   o Where the demo's own timing comes from. XCURSION ends every part
+     on a music order position and has no retrace wait; Lithium has no
+     MOV DX,0x3da site at all [verified], which is consistent but not
+     proof - ../README.txt section 5.

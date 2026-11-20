@@ -1,0 +1,369 @@
+PCDEMOS 64k                                            Analysis Note
+
+
+                      EXCURSION: THE TUNNEL
+
+
+Abstract
+
+   Four routines, found together: Tunnel_BuildAngle at 1000:2c6a,
+   Tunnel_BuildDepth at 1000:2bd4, Tunnel_Render at 1000:2b2d and
+   Tunnel_Run at 1000:2aef. Parts sync 0x2a, 0x2b and 0x32.
+
+   TWO FULL-SCREEN TABLES SUPPLY THE TWO HALVES OF ONE 16-BIT TEXTURE
+   INDEX. The angle table is the low byte and the depth table the
+   high byte, so a tunnel costs one add per axis and one indexed read
+   per pixel - no multiply, no divide, no clamp.
+
+   Tunnel_Run calls Mesh_Draw after the renderer, which is the ship
+   flying through it.
+
+Table of Contents
+
+   1. The chain
+   2. The depth table
+   3. The angle table, and the one instruction that links it
+   4. The render
+   5. The exit
+   6. The part, the palette and the texture
+      6.1. The sync 0x32 part, and the exit
+   7. The transcription
+   8. Poly_FillFlat
+   9. Open questions
+
+1.  The chain
+
+   +---------------------------+------------------------------------+
+   | Tunnel_BuildDepth 2bd4    | segment 0x4a79 = depth, 0x7a79 =   |
+   |                           | depth/8. Called ONCE at img 0x0816 |
+   |                           | in the sync 0x26 part, as setup    |
+   +---------------------------+------------------------------------+
+   | Tunnel_BuildAngle 2c6a    | segment 0x6a79 = the angle. Called |
+   |                           | at img 0x090f                      |
+   +---------------------------+------------------------------------+
+   | Tunnel_Render 2b2d        | samples the texture at 0x2a79      |
+   |                           | through both, into g_WorkSeg       |
+   +---------------------------+------------------------------------+
+   | Tunnel_Run 2aef           | eases the two scrolls, renders,    |
+   |                           | MESH_DRAW, presents, loops         |
+   +---------------------------+------------------------------------+
+
+   The tables are built in an earlier part than the one that uses
+   them, which is why neither builder appears in the tunnel's own
+   parts and why nothing in sync 0x2a looks like it sets a tunnel up.
+
+2.  The depth table
+
+   Tunnel_BuildDepth first rebuilds g_SqrTable as 200 DWORDS of
+   (k+1)^2 at cs:0xaf7c [verified].
+
+   PLANET_BUILDMAP BUILDS 90 WORDS AT THE SAME ADDRESS. Two owners,
+   two element widths, each rebuilding before use - the table is
+   scratch. Reading cs:0xaf7c as either layout alone is wrong, and
+   the two square roots that read it differ to match: Sqr_NearestRoot
+   at 1000:43b5 scans words linearly, Sqr_NearestRootBisect at
+   1000:2e9d bisects dwords.
+
+   Then per pixel over 320x200 [verified]:
+
+       eax = sqr[|col - 160|] + sqr[|row - 100|]        = r^2
+       si  = Sqr_NearestRootBisect(eax)                 a BYTE offset
+       al  = (0x4000 / (si + 1)) truncated to a byte    -> 0x4a79
+       al  = that >> 3                                  -> 0x7a79
+
+   SI IS A BYTE OFFSET IN A DWORD TABLE, so si+1 is 4k+1 and the
+   divisor is about four times the radius. The effective constant is
+   0x1000 per unit r, not 0x4000. Do not "fix" the +1.
+
+   THE TRUNCATION TO A BYTE IS THE EFFECT. 0x4000/(4k+1) exceeds 255
+   for every radius under about 16, so the stored depth WRAPS
+   repeatedly near the centre. Transcribed, the centre row reads
+
+       236  143  202  135  101  81  67  58  51  45  40  37
+
+   at 0, 10, 20 ... pixels out: non-monotonic for the first three
+   samples where it wraps, then a clean 1/r falloff. That accelerating
+   repeat toward the middle IS what makes the tunnel look infinitely
+   deep. It is not an overflow bug.
+
+   Writing 0x4a79 from offset 0 destroys Shots_Draw's slot table at
+   0x1770 and Glow_Render's field at 0x1800. Both belong to parts
+   before sync 0x26, so nothing is lost - but it is why the glow and
+   the tunnel can never coexist.
+
+3.  The angle table, and the one instruction that links it
+
+   Tunnel_BuildAngle DRAWS its table rather than computing it
+   [verified]:
+
+       img 2c6d  g_PolyVerts[0] and [3] pinned to 0xa0, 0x64 - the
+                 SCREEN CENTRE - so every wedge is a triangle apexed
+                 there
+       img 2c8c  g_PolyBandBase = BL, the wedge index 0 to 255, so
+                 THE FILL COLOUR IS THE ANGLE
+       img 2ce8  Poly_FillFlat, 256 times
+
+   256 flat triangles from the centre, each coloured with its own
+   index, leaves every pixel holding its own angle in 1/256 turns. An
+   atan2 table, rasterised.
+
+   NOTHING IN Tunnel_BuildAngle NAMES A DESTINATION SEGMENT, and this
+   is the trap. Every other renderer in the demo draws to g_WorkSeg,
+   which is written once at img 0x0152 and is always 0x5a79. Poly_Fill
+   at 1000:4b2c uses whatever ES the caller left.
+
+       img 2d42   POLY_FILLFLAT HARDCODES  mov ax, 0x6a79 ; mov es, ax
+
+   That single instruction is the entire link between this routine and
+   the tunnel. Without it the fan looks like a full-screen effect in
+   its own right.
+
+   The wedge geometry, img 0x2c89-0x2cec [verified]:
+
+       vertices 0 and 3   pinned to (0xa0, 0x64), the centre
+       vertex 1           (cos(bx) >> 4 + 0xa0, sin(bx) >> 4 + 0x64)
+       vertex 2           the same at bx + 8, the next wedge's angle
+       bx = (cx << 3) & 0x7fc, cx counting 0x100 down to 1
+
+   cos >> 4 reaches 255, so each wedge's far edge is well off a
+   320x200 screen and Poly_FillFlat's clamps cut it to the border -
+   which is how every pixel gets a value. THE COLOUR IS THE LOW BYTE
+   OF THE DOWN-COUNTER, img 0x2c8c, so the angles run backward: 0x00,
+   0xff, 0xfe down to 0x01.
+
+   img 0x2c94 does SUB AX, 0x4 before AX is loaded at img 0x2c9b, so
+   that instruction is dead - a leftover, not a term.
+
+4.  The render
+
+   Tunnel_Render, img 0x2b2d [verified]:
+
+       DS = 0x5a79   g_WorkSeg, the destination
+       ES = 0x6a79   the angle table
+       FS = 0x4a79   the depth table
+       GS = 0x2a79   the 256x256 texture
+
+       DL = g_TunnelAngle >> 3
+       DH = the HIGH BYTE of g_TunnelDepth, at cs:0x946d
+
+   per pixel, img 0x2b68:
+
+       BL = angleTable[di] + DL
+       BH = depthTable[di] + DH
+       AL = texture[BX]
+
+   The two tables land in the two halves of one index, so the
+   texture's x axis is the angle and its y axis the depth, and both
+   scroll by a byte add. The depth scroll is 8.8 and only its integer
+   part reaches the index.
+
+   IT DRAWS HALF THE PIXELS PER FRAME. img 0x2b77 steps DI by 2;
+   img 0x2b5f offsets the row start by one when g_TunnelParity is odd;
+   img 0x2b81 flips it per row and img 0x2b89 flips it AGAIN per
+   frame. So it is a checkerboard that inverts every frame - two
+   frames to cover the screen, and the skipped pixels keep what was
+   already there. Transcribed, four frames write 63621 of 64000
+   pixels.
+
+   Tunnel_Run eases both scrolls toward their targets by >> 3 at
+   img 0x2afe and 0x2b10 - the demo's usual shift-and-add - then calls
+   Mesh_Draw and Vga_Present.
+
+5.  The exit
+
+   img 0x2b53 picks between two variants on g_MusicPos [verified]:
+
+       below 0x2d    the plain tunnel
+       0x2d and up   img 0x2b8f switches FS to 0x7a79, the depth
+                     table divided by 8, and blacks out any pixel
+                     whose mask value EXCEEDS g_TunnelFade
+
+   The mode 0x13 handler counts g_TunnelFade down every other tick at
+   img 0x16e9, through its own divider at img 0xa887. The mask is
+   largest at the centre - 157 there against 2 at the corner - so as
+   the threshold falls THE TUNNEL GOES BLACK FROM THE MIDDLE OUTWARD,
+   and the corners are the last to go.
+
+   NOTHING EVER RESETS g_TunnelFade. img 0x16e9 is its only writer
+   and mode 0x13 runs in one part only, so it enters that part at its
+   static 0xa5 [verified] - 165, above the mask's 157 peak, which is
+   what makes the tunnel start whole and open rather than beginning
+   already holed. The sync 0x2a and 0x2b passes never touch it.
+
+   That is the exit from the tunnel, and it is the same table serving
+   twice: a depth coordinate at full scale and a radial mask at
+   one eighth.
+
+6.  The part, the palette and the texture
+
+   img 0x0892, sync 0x2a, mode 0x10, runner Tunnel_Run [verified]:
+
+       g_MeshZScale = 0x100                       img 0x0892
+       Vga_ClearScreen                            img 0x089c
+       Buf_ClampMin1                              img 0x089f
+       the craft at 0x5000, 0x2000, 0x30000       img 0x08a2
+       angles all 0                               img 0x08c0
+       g_TunnelDepth = g_TunnelAngle = 0          img 0x08d5
+       g_RotoZoom = g_RotoAngle = 0               img 0x08e6
+       g_AnimMode = 0x10                          img 0x08f7
+       Pal_BuildMain, then Pal_BuildBlueMagenta        img 0x08fe
+       g_FadeLevel = 0xc000, Pal_Fade             img 0x0905
+       Tunnel_BuildAngle                          img 0x090f
+       g_MusicPosTarget = 0x2a                    img 0x0912
+       Tunnel_Run                                 img 0x0919
+
+   THE TEXTURE IS THE ROTATING PLASMA'S OWN FIELD, still halved into
+   0..127. No Plasma_Generate runs between img 0x07ed and here, and
+   img 0x089f is only Buf_ClampMin1 lifting the zeros to 1 - so the
+   tunnel is lined with the cloud the previous part was turning.
+   That answers what is in 0x2a79 for the sync 0x2a part.
+
+   AND THAT IS WHY THE PALETTE IS BUILT TWICE. Pal_BuildMain runs
+   first, then Pal_BuildBlueMagenta at 1000:3df6 overwrites the lower 192
+   entries with black to blue to magenta and back to black. Only the
+   first two of its three bands are ever indexed, because the texture
+   stops at 127.
+
+   THE SYNC 0x2b PART RUNS THE SAME TUNNEL BACKWARDS, img 0x091c, on
+   mode 0x11 and the same Tunnel_Run [verified]. It rebuilds nothing -
+   both tables and the texture carry over - and only moves the craft:
+
+       the craft at -0x5000, -0x2000, 0x4000      img 0x091c
+       pitch 0, YAW 0x400, roll 0                 img 0x093a
+       g_AnimMode = 0x11                          img 0x094f
+       g_MusicPosTarget = 0x2b                    img 0x0955
+
+   0x400 is half a turn, so the craft faces away while mode 0x11
+   walks its z OUT - and mode 0x11 is mode 0x10 with the signs
+   flipped on everything except the roll, which keeps turning the
+   same way. It has no fade block: mode 0x10 brought the level up and
+   this one leaves it there.
+
+   So the texture answer covers this part too - nothing regenerates
+   0x2a79 between img 0x07ed and img 0x095c.
+
+   Mode 0x10 at img 0x160c then CYCLES THE PALETTE EVERY TICK through
+   Pal_CycleBands at 1000:3aee - which is NOT Pal_Cycle at 1000:3ac5.
+   It moves 0x23a bytes, so it rotates entries 1 to 191 and leaves 0
+   and everything above alone: exactly the span Pal_BuildBlueMagenta
+   covers. The colour therefore flows down the tunnel.
+
+   Everything else in mode 0x10 decreases [verified]: the craft's
+   roll by 8, its z by 0x200 so it comes toward the camera, and both
+   tunnel TARGETS - g_RotoAngle by 8 and g_RotoZoom by 0x100 - which
+   Tunnel_Run then eases the real scrolls onto by an eighth.
+
+6.1.  The sync 0x32 part, and the exit
+
+   img 0x098f, sync 0x32, mode 0x13, runner Tunnel_Run [verified] -
+   THE LAST PART OF Demo_Entry, which tail-jumps into Demo_Timeline at
+   img 0x0a37 rather than returning:
+
+       Vga_ClearScreen                            img 0x098f
+       g_AnimMode = 0x13                          img 0x0992
+       clear the work buffer 0x5a79               img 0x099b
+       DS = 0x2a79, rough 1, bias 0x800, mask 0xfff   img 0x099e
+       Plasma_Generate                            img 0x09b7
+       halve every byte                           img 0x09ba
+       Buf_ClampMin1                              img 0x09cc
+       the craft at -0x5000, 0x2000, 0x4000       img 0x09cf
+       pitch 0, YAW 0x400, roll 0                 img 0x09ed
+       g_TunnelDepth = g_TunnelAngle = 0          img 0x0a02
+       g_RotoZoom = g_RotoAngle = 0               img 0x0a13
+       Pal_BuildMain, then Pal_BuildBlueMagenta   img 0x0a24
+       Pal_Fade                                   img 0x0a2a
+       g_MusicPosTarget = 0x32                    img 0x0a2d
+       Tunnel_Run                                 img 0x0a34
+
+   UNLIKE THE OTHER TWO PASSES THIS ONE REGENERATES THE TEXTURE, so
+   the cloud lining the exit tunnel is not the one the sync 0x2a and
+   0x2b passes used. The stream position for it is the shared RNG's
+   natural one - src/ reaches img 0x9879 holding 0x99e2 0x934a and so
+   does the demo, with the plasma corners at 222 and 205 in both
+   [verified], so no consumer between here and the opening is missed.
+
+   Pal_Fade at img 0x0a2a runs WITHOUT the part setting a level. That
+   is deliberate: mode 0x10 left g_FadeLevel at 0 three parts back,
+   and the call is what rebuilds g_Palette after the water wrote the
+   DAC directly - see effects/water.txt section 8.
+
+   THE PART SETS ITS MODE BEFORE ITS OWN SETUP. img 0x0992 against
+   img 0x09fb puts a 64 KB clear, a full Plasma_Generate, a 64 KB
+   halve and a 64 KB clamp between them, and mode 0x13 is ticking
+   throughout - so the fade is already several steps down when the
+   first frame appears while the roll, set later, starts from zero.
+   How many steps is machine speed: the demo's own gap measures nine
+   ticks [observed].
+
+   Mode 0x13 at img 0x16a8 is otherwise mode 0x11 with the craft's z
+   at 0x80 rather than 0x200 - a drift rather than a departure - and
+   it carries mode 0x10's fade climb, which mode 0x11 does not.
+
+7.  The transcription
+
+   src/xcursion/xcursion_tunnel.c has Xcur_TunnelBuildDepth,
+   Xcur_PolyFillFlat, Xcur_TunnelBuildAngle and Xcur_TunnelRender,
+   with the two palettes in xcursion_pal.c and the part as scene 20 of
+   xcursion_demo.c.
+
+   BOTH PARTS' CRAFT STATE IS EXACT. At sync 0x2b, 24 animation ticks
+   in, the demo and src/ agree on all five of position, yaw and roll -
+   -0x5000, -0x2000, 0x7000, 0x400, 0xff40 - and the tunnel's own two
+   scrolls agree to within one tick, the angle by exactly its 8
+   [observed]. The sync 0x2a part matches on position and rate but
+   enters two ticks early, which the sync 0x2b part then erases by
+   reseeding both the position and the roll.
+
+   ALL THREE TABLES ARE BYTE-EXACT against a running demo: the depth
+   at 0x4a79, the angle at 0x6a79 and the eighth-scale copy at 0x7a79
+   all match their first bytes, and at offset 0x327b the angle reads
+   0xa9 and the depth 0x39 both ways [observed].
+
+   SO DOES THE INDEX COMPOSITION. Caught mid-render at that offset,
+   the demo held BX = 0x0070 with DX = 0xc7c7 - the angle scroll in DL
+   and the depth scroll in DH - and composing src/'s own two table
+   values with those same two bytes gives 0x0070 [observed]. That
+   settles the two halves, both scroll derivations and the byte wrap
+   in one comparison.
+
+   sim/xcursion/parts.py has sqr_nearest_root_bisect,
+   tunnel_build_depth, poly_fill_flat, tunnel_build_angle and
+   tunnel_render; sim/xcursion/demo.py part 19 is the tunnel, and X
+   toggles the exit variant.
+
+   ALL OF IT IS THE DEMO'S. The angle table was briefly computed
+   directly - tunnel_build_angle_OURS, kept for comparison - because
+   Poly_FillFlat was unread. It is now DRAWN the way the demo draws
+   it, and the two agree to WITHIN ONE STEP at every sample point
+   checked; the difference is the rasterisation seams the analytic
+   version cannot have. The drawn table sets 63700 of 64000 pixels and
+   covers all 256 values, and the 300 it misses are the wedge seams,
+   which keep whatever was already in the buffer.
+
+   Only the scroll RATES remain ours, standing in for Tunnel_Run's
+   easing targets.
+
+   Poly_Fill minus the Gouraud: one flat colour from g_PolyBandBase
+   and a byte fill loop. Its plate has the instruction detail.
+
+   THE STRUCTURAL POINT IS THE SPAN UNITS. g_SpanMinY and g_SpanMaxY
+   hold ROW * 16, which is why the span stride is 16 and why img
+   0x2e40 can derive both the span offset and row*320 from one value
+   with two shifts.
+
+8.  Poly_FillFlat
+
+9.  Open questions
+
+   o THE EASE IS PER RENDER AND THE RENDER RATE IS MACHINE SPEED.
+     Tunnel_Run's two shift-and-adds sit inside its loop at img
+     0x2afa, and it calls Input_Poll rather than Demo_WaitTick, so it
+     renders flat out - which means HOW FAR THE TUNNEL LAGS ITS
+     TARGET is set by how fast the machine is. Measured from the
+     steady-state lag: the demo eases about 1.23 times per animation
+     pass. src/ does it once per pass, which puts the angle scroll
+     within the two-tick entry offset of the demo's and the depth
+     within 391 of 512 [observed]. Easing once a FRAME instead -
+     half as often - leaves the tunnel lagging two and a half times
+     too far behind, which is visible as a turn that does not keep
+     up with the craft.

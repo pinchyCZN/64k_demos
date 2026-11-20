@@ -1,0 +1,119 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                       UKKO: STARTUP AND VIDEO
+
+
+Abstract
+
+   What Demo_Main does before the first frame, and the two video
+   modes it sets. All [verified] from the depacked listing unless
+   marked otherwise.
+
+   THE DEMO RUNS IN MODE 0Dh, NOT MODE 13h, and its logo is a single
+   EGA bitplane - which is why it looks monochrome.
+
+   Addresses are in the DEPACKED image, UKKO_U.EXE, whose CODE_1
+   begins at 1020:0000. The packed file's addresses are unrelated.
+
+Table of Contents
+
+   1. The entry
+   2. Demo_Main
+   3. The two video modes
+   4. The logo is one bitplane
+   5. The music handoff
+   6. Open questions
+
+1.  The entry
+
+   The depacked entry is 1020:0000 and holds one instruction, a JMP
+   to 1020:e5bc. Everything between is data - the soundcard menu
+   text starts eight bytes later at 1020:0205.
+
+2.  Demo_Main
+
+   1020:e5bc.
+
+       maybe_Sound_Setup                 the card menu
+       INT 21h AH=4A BX=0x3000           shrink the block to 192 KB
+       g_ModuleSeg = 0x9000
+       copy 0x7d00 from 8038:0000 to 9000:0000
+       Music_Driver(AX=1, AH=g_SndCardKind, BL=3,
+                    BH=g_SndIrq, DX=g_SndBasePort)
+       Music_Driver(AX=7, DX=g_ModuleSeg)
+       Music_Driver(AX=2)
+       INT 10h AX=0x13
+       a 0x100-entry grey ramp to 0x3c8/0x3c9
+       g_RowOffsets[0..0xc7] = 0, 0x140, 0x280 ...
+       INT 10h AX=0x000d
+       copy 0x1f40 from g_LogoPlane to a000:0000
+       Music_Driver(AX=4)
+       IN AL,0x60;  exit if scancode 1
+       ... 0x3da ...
+
+   g_RowOffsets AT 1020:0177 IS A ROW TABLE, 200 dwords of y * 320
+   built with a STOSD loop. That is a mode 13h stride, and it is the
+   right one: mode 0Dh is used ONLY to show the logo, and Demo_Main
+   sets 13h again before the dance - ../effects/stickman.txt.
+
+3.  The two video modes
+
+   INT 10h AX=0x13 sets 320x200x256, and the next twenty instructions
+   program all 256 DAC entries with a grey ramp:
+
+       AL = (-CL) >> 2,  written three times as R, G and B
+
+   so every entry is neutral and the ramp descends as the index
+   rises. Then INT 10h AX=0x000d sets mode 0Dh, EGA 320x200 with
+   four planes of 16 colours.
+
+   AN INT 10h MODE SET RESETS THE DAC, so the ramp programmed under
+   13h does not survive into 0Dh. What it is for is open.
+
+4.  The logo is one bitplane
+
+   The copy to a000:0000 is 0x1f40 bytes - 8000, which is exactly
+   320 * 200 / 8. That is ONE PLANE of mode 0Dh, so the image is one
+   bit per pixel and reads as monochrome however the sixteen
+   attributes are set.
+
+   The source is 1020:8795, image offset 0x8995.
+
+5.  The music handoff
+
+   Music_Driver at 6000:f133 is far-called with a function number in
+   AX. Four calls are made before the first frame:
+
+   +------+-------------------------------------------------------+
+   | AX   | What is passed                                        |
+   +======+=======================================================+
+   | 1    | AH = card kind, BL = 3, BH = IRQ, DX = base port      |
+   | 7    | DX = g_ModuleSeg, the staged module                   |
+   | 2    | nothing                                               |
+   | 4    | nothing, and it is the last before the key test       |
+   +------+-------------------------------------------------------+
+
+   THE DRIVER IS A SEPARATE BLOB, not demo code. It sits around
+   image offset 0x5f133, inside the one region of the sparse middle
+   that carries content - ../README.txt section 3.
+
+   8038:0000 IS THE S3M MODULE. Linear 0x80380 is image offset
+   0x70380, where the SCRM header sits, so the 0x7d00-byte copy to
+   0x9000 stages the module where the driver can reach it.
+   ../formats/music.txt.
+
+6.  Open questions
+
+   o Why the grey ramp is programmed under mode 13h when the mode
+     set that follows resets it. Either something reprograms the DAC
+     after 0Dh, or the ramp is vestigial.
+
+   o Whether INT 21h AH=4A with BX=0x3000 is reached with ES still
+     pointing at the PSP. Shrinking to 192 KB would cut into a
+     486 KB image, so either ES is something else or most of the
+     image is already finished with by then.
+
+   o What the 0x7d00-byte copy leaves behind. The module is 22,902
+     bytes by ../formats/music.txt and 0x7d00 is 32,000, so the copy
+     carries about 9 KB past the end of the module.

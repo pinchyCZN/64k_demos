@@ -1,0 +1,263 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                        LITHIUM: THE FIGURE
+
+
+Abstract
+
+   The final scene's figure is A BIPED OF FIFTEEN BALLS ON A
+   HIERARCHICAL SKELETON. Forward kinematics in one pass, a walk cycle
+   generated from a single sine phase, and four ball sizes used at
+   once.
+
+   Nothing about it is keyframed and nothing about it is stored per
+   frame. The whole animation is two table lookups and about a dozen
+   instructions.
+
+   Three routines and one array: Figure_Draw at 1000:11cf,
+   Tick_Finale at 1000:6454, Vec_RotateByObj at 1000:133e, and
+   g_JointRecs at img 0x92fe. All [verified] from those and from the
+   data unless marked.
+
+Table of Contents
+
+   1. g_JointRecs, and the skeleton it describes
+   2. Figure_Draw, the forward kinematics
+   3. Tick_Finale, the walk
+   4. The four balls
+   5. Vec_RotateByObj
+   6. The scene cannot light itself
+   7. Open questions
+
+1.  g_JointRecs, and the skeleton it describes
+
+   FIFTEEN RECORDS OF 0x40 BYTES, img 0x92fe to 0x96bd. Exact on two
+   counts: g_JointCount at 0x92f0 holds 15, and 0x92fe + 15 * 0x40 is
+   0x96be, precisely where g_PalMain begins.
+
+       +0x00  word   the address of a g_BallMeshTable entry
+       +0x02  word   this joint's g_MeshNrmOut buffer
+       +0x04  word   angle X    } Tick_Finale writes these
+       +0x06  word   angle Y    }
+       +0x08  word   angle Z    }
+       +0x0a  dword  accumulated world X - scratch, per frame
+       +0x0e  dword  accumulated world Y
+       +0x12  dword  accumulated world Z
+       +0x16  word   PARENT INDEX, -1 for the root
+       +0x18  dword  offset vector A - x, y, z
+       +0x24  dword  offset vector B - x, y, z
+       +0x30         unaccounted
+
+   The static data is a biped and reads as one directly:
+
+       j  parent  offset A          ball
+       0    -1    0,     0, 0        3     the root
+       1     0    80,   48, 0        0     right shoulder
+       2     1    0,   128, 0        0     right elbow
+       3     2    0,   120, 0        1     right hand
+       4     0    -80,  48, 0        0     left shoulder
+       5     4    0,   128, 0        0     left elbow
+       6     5    0,   120, 0        1     left hand
+       7     0    0,     0, 0        2     the hips
+       8     7    80, -128, 0        0     right hip
+       9     8    0,  -128, 0        0     right knee
+      10     9    0,  -128, 0        1     right foot
+      11     7    -80,-128, 0        0     left hip
+      12    11    0,  -128, 0        0     left knee
+      13    12    0,  -128, 0        1     left foot
+      14     7    0,  -128, 0        3
+
+   Two arm chains and two leg chains, mirrored at x = +80 and -80,
+   128-unit upper limbs and 120-unit forearms. The arms hang off joint
+   0 and the legs off joint 7, which hangs off joint 0 as well.
+
+   THE RECORDS ARE STORED PARENT-BEFORE-CHILD. Every parent index is
+   smaller than its own index, which is what lets Figure_Draw resolve
+   the whole hierarchy in a single forward pass.
+
+2.  Figure_Draw, the forward kinematics
+
+   1000:11cf. It fills g_BallMeshTable, clears both scene pool
+   counters with one dword store at 0x88af, and then walks the fifteen
+   records with si = joint * 0x40.
+
+   Per joint:
+
+       g_MeshSrcOff = *(joint[+0x00])        indirect via the table
+       g_MeshNrmOut = joint[+0x02]
+       g_ObjScaleShift = 0x10                the identity shift
+       g_ObjMirror = 0
+       di = joint[+0x16]
+       if di < 0:
+           the position is g_FigureRoot{X,Y,Z}
+       else:
+           di *= 0x40
+           g_ObjAngle{X,Y,Z} = PARENT[+0x04,+0x06,+0x08]
+           rotate offset A by them       -> joint[+0x0a..]
+           g_ObjAngle{X,Y,Z} = SELF[+0x04,+0x06,+0x08]
+           rotate offset B by them
+           add joint[+0x0a..] and PARENT[+0x0a..]
+       joint[+0x0a,+0x0e,+0x12] = the result
+       g_CurPosX = -x,  g_CurPosY = y,  g_CurPosZ = z
+       g_ObjAngle{X,Y,Z} = SELF angles
+       Mesh_Transform
+       si += 0x40
+
+   SO A JOINT'S WORLD POSITION IS the parent's, plus offset A rotated
+   by the PARENT's orientation, plus offset B rotated by its OWN. Two
+   offsets per joint rather than one is what lets a limb have both a
+   socket and a length without a second record.
+
+   g_CurPosX takes the NEGATED x because Mesh_Transform subtracts
+   g_CurPosX and adds g_CurPosZ - subsystems/mesh3d.txt section 3.2 -
+   so the negation makes both axes come out the same way round.
+
+   Each joint is a separate Mesh_Transform call, so the figure
+   arrives in the scene pools as fifteen independent objects and the
+   rasteriser never knows it is one figure.
+
+3.  Tick_Finale, the walk
+
+   1000:6454, installed by maybe_Scene_Finale.
+
+       bx = g_WalkPhase & 0x1ffc
+       c  = g_SinTable[bx + 0x800]        cosine
+       s  = g_SinTable[bx]                sine
+
+       a = c >> 3        -> joint 0  angle Y
+       a = -(a >> 1)     -> joint 7  angle Y
+       a = -(a >> 1)     -> joint 14 angles Y and Z
+       a = -(a >> 1)     -> joint 0  angle Z
+       (c >> 2) + 0x244  -> joint 1  angle X
+       (s >> 2) - 0x2bc  -> joints 2 and 3 angle X
+       (c >> 3) + 0xd00  -> joint 11 angle X
+       -0x100            -> joint 11 angle Z
+       (c >> 2) + 0x1400 -> joint 12 angle X
+       that     + 0x800  -> joint 13 angle X
+
+       bx += 0x1000;  bx &= 0x1ffc        HALF A CYCLE ON
+       (c >> 2) + 0x244  -> joint 4  angle X
+       (s >> 2) - 0x2bc  -> joints 5 and 6 angle X
+       (c >> 3) + 0xd00  -> joint 8  angle X
+       +0x100            -> joint 8  angle Z
+       (c >> 2) + 0x1400 -> joint 9  angle X
+       that     + 0x800  -> joint 10 angle X
+
+       bx = (phase + 0x1000) * 2 + 0x708, masked
+       s >> 6            -> joint 0  angle X
+       -that - 0x200     -> joint 7  angle X
+
+       bx = phase * 2, masked
+       (c >> 0xa) + 0x5a -> g_SlotPosY                the camera's bob
+       g_WalkPhase += 0x40
+       g_CamPosZ   += 4                               the approach
+       g_SlotAngleZ[0]--                              a slow roll
+
+   g_WalkPhase at 1000:9001 advances by 0x40 per tick - 1000:659c does
+   ADD word ptr CS:[g_WalkPhase], 0x40.
+
+   THE CYCLE IS 128 TICKS. The mask is 0x1ffc and the table index is
+   that shifted down two, so the phase spans 0x2000 across a
+   2048-entry turn: 0x2000 / 0x40 = 128. Dividing the entry count by
+   the step gives 32 and is four times too fast - the same trap the
+   plate comment on Image_BlitScaled records.
+
+   THE HALVING CHAIN IS THE SKELETON EXPRESSED AS ARITHMETIC. Each
+   step halves and negates the previous value, giving the next joint
+   half the amplitude and the opposite phase for one SAR and one NEG.
+   Four joints come out of one cosine sample that way.
+
+   The additive terms 0x244, -0x2bc and 0xd00 are rest angles, so
+   those joints swing about a fixed pose instead of about zero.
+
+   THE LEFT SIDE IS THE RIGHT SIDE HALF A CYCLE LATER. 1000:64ef adds
+   0x1000 to the phase - half of the 0x2000 a turn spans - and repeats
+   the same stores against joints 4 to 6 and 8 to 10. One cosine read
+   twice drives all twelve limb joints, and only joint 14 takes
+   anything of its own.
+
+   THE BOUNCE AND THE BOB RUN AT DOUBLE RATE, 1000:6559 and 1000:6583
+   doubling the phase before the lookup, because a stride has two
+   footfalls. The 0x708 added to the first is a phase offset in the
+   same units - about a sixteenth of a turn.
+
+   NOTHING MOVES THE FIGURE. g_CamPosZ gains 4 a tick and
+   g_FigureRoot is never written, so the man runs on the spot and the
+   camera closes on him - three words a tick rather than fifteen.
+
+4.  The four balls
+
+   g_BallMeshTable at img 0x9027 holds four words, filled by
+   Figure_Draw: 0x4974, 0x49f6, 0x4a78, 0x4afa. A joint's +0x00 field
+   holds the ADDRESS of a table entry rather than an index.
+
+   THE FOUR MODELS ARE FOUR BALL SIZES USED SIMULTANEOUSLY, not
+   keyframes. They share a face list because they are the same
+   ten-vertex blob at different radii - mean distance from the
+   centroid is 26.8 for ball 0, which the limbs use, against 16.9 for
+   ball 1, which the hands and feet use.
+
+   Each ball also gets its own normal buffer - g_MeshNrmOut 0x8000,
+   0x83e8, 0x87d0 and 0x8bb8, spaced 0x3e8 - so Mesh_Load runs once
+   per ball at startup and the per-vertex normals for all four exist
+   together. formats/mesh.txt section 4.1.
+
+   The blobs are lumpy rather than spherical: radius varies by about
+   half within one model.
+
+5.  Vec_RotateByObj
+
+   1000:133e, called twice a joint by Figure_Draw.
+
+       cs:[g_RotAngleZ] = g_ObjAngleZ * 2;  Vec_RotZ
+       x, y, z >>= 9
+       cs:[g_RotAngleX] = g_ObjAngleX;      Vec_RotX
+       x, y, z >>= 9
+       cs:[g_RotAngleY] = g_ObjAngleY;      Vec_RotY
+       x, y, z >>= g_ObjScaleShift
+
+   THE Z ANGLE IS DOUBLED AND THE OTHER TWO ARE NOT, 1000:1344, so a
+   joint's roll turns it twice as far as its pitch or yaw for the same
+   stored word.
+
+   THE LAST STAGE SHIFTS BY THE SCALE RATHER THAN BY NINE, 1000:1383,
+   which is where the offsets stop being mesh units and become world
+   ones. g_ObjScaleShift is 0x10 for every joint, so the figure is
+   never scaled - only the offsets are brought down.
+
+6.  The scene cannot light itself
+
+   maybe_Scene_Finale opens dark - the script sets g_PalFade to
+   -0xa0 against a target of 0 at 1000:03ba - and relies on the
+   common tail easing it up. Two things in Tick_Default decide
+   whether that happens:
+
+       if g_PalFlash and the flash counter has run out:
+           if g_PalFade < g_PalFlash:  g_PalFade = g_PalFlash
+       ...
+       if g_PalFade != g_PalFadeTarget:  Pal_Upload
+
+   THE DAC IS ONLY RE-UPLOADED WHILE THE FADE IS MOVING. So if
+   anything makes the fade ARRIVE rather than ease, the last upload
+   stands for the rest of the scene.
+
+   g_PalFlash IS WHAT WOULD MAKE IT ARRIVE, and maybe_Scene_Greetings
+   sets it to 1 at 1000:1403 for its own strobe. Left set, the clamp
+   above lifts the fade from -0xa0 to 1 in one tick and the next step
+   takes it to the target, so the only upload the finale ever gets is
+   the dark one the script made - every entry 40 below its stored
+   value, which leaves nothing but the brightest sphere-map samples
+   above zero. The figure reads as unlit rather than as dark.
+
+   1000:1503 IS THE GUARD. The greetings clear g_PalFlash in the
+   instruction after their loop, and that clear is what lets the
+   finale light itself two scenes later [verified].
+
+7.  Open questions
+
+   o Bytes +0x30 to +0x3f of each record, which nothing read touches.
+
+   o Why joint 14 exists. It hangs off the hips with ball 3, the
+     root's own size, and takes angles Y and Z from the halving chain
+     but no X - so it is neither a limb nor the torso.

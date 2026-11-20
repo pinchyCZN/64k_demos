@@ -1,0 +1,275 @@
+PCDEMOS 64k                                            Analysis Note
+
+
+                      EXCURSION: THE WATER
+
+
+Abstract
+
+   Water_Step at 1000:29d4 is A 2D WAVE EQUATION SOLVER - the real
+   thing, in eleven instructions - and it serves two scenes through
+   two different renderers.
+
+       sync 0x2d   Water_Run      Water_Step + Water_RenderSpans
+       sync 0x52   TheEnd_RunWater  Mesh_Draw + Water_Step +
+                                    Water_Refract
+
+   So the dripping water in the middle of the demo and the water drop
+   that closes it are the same solver, the same field and the same
+   damping. Only the way the field reaches the screen differs.
+
+Table of Contents
+
+   1. The solver
+   2. The grid, and what drives it
+   3. Water_RenderSpans - the sync 0x2d scene
+   4. Water_Refract - the finale
+   5. What it looks like over time
+   6. The transcription
+   7. Open questions
+   8. The drips - the mode 0x12 handler
+
+1.  The solver
+
+   img 0x29e9, per cell [verified]:
+
+       ax = [di-2] + [di+2] + [di-0x140] + [di+0x140]
+       ax >>= 1                     the four-neighbour sum, halved
+       ax -= ES:[di]                MINUS THE OLD VALUE
+       ax -= ax >> CL               the damping
+       ES:[di] = ax
+
+   new = mean(neighbours) * 2 - old is the discrete wave equation in
+   its standard two-timestep form. SUBTRACTING THE OLD VALUE IS THE
+   SECOND TIME DERIVATIVE, and it is the reason two buffers are
+   needed rather than one - img 0x2a10 XCHGs g_WaterBufA and
+   g_WaterBufB at the end of every step, so their roles alternate.
+
+   THE DAMPING IS A SHIFT, NOT A MULTIPLY: ax -= ax >> 4 is ax * 15/16
+   with g_WaterDamping at its static 4. Without it the wave would ring
+   forever.
+
+   Eleven instructions, two memory buffers and one shift is the whole
+   of it. There is no velocity field and no explicit timestep.
+
+   IT PROCESSES ROWS 1 TO 100 OF A 0 TO 99 GRID. img 0x29de starts at
+   word 160 and img 0x29e1 counts 0x3e80 = 16000 cells, so it runs one
+   row past the end, and the +0x140 neighbour read reaches a row
+   beyond that again - the same over-run Water_Refract has. Section 6.
+
+2.  The grid, and what drives it
+
+   THE GRID IS 160 x 100 SIGNED WORDS - not bytes, and not 320 wide
+   [verified]. DI steps by 2, the vertical neighbours are at
+   +/-0x140 BYTES which is 160 words, and the loop count 0x3e80 is
+   16000 = 160 * 100. Each cell drives a 2x2 screen block.
+
+   The buffer pair is the script's choice, not the solver's:
+
+       img 096b, 0972   0x5a79 and 0x2a79, for sync 0x2d - and
+                        img 0x0962 and 0x0968 CLEAR BOTH first
+       img 53a0, 53a7   0x6a79 and 0x7a79, for the finale, which
+                        leaves g_WorkSeg free to hold the letters
+
+   WHAT DRIVES IT IN THE FINALE IS ONE WORD. The mode 0x1c handler at
+   img 0x1c8f writes sin(phase) * amp >> 0xb to offset 0x3f20 of
+   g_WaterBufB. 0x3f20 bytes is word 8080, and 8080 is row 50 column
+   80 of a 160 x 100 grid - DEAD CENTRE. g_EndOscAmp climbs every tick
+   with no ceiling, so the drop builds.
+
+   What drives it at sync 0x2d is the mode 0x12 handler - section 8.
+
+3.  Water_RenderSpans - the sync 0x2d scene
+
+   1000:2a1a. The field drawn as COLUMN SPANS, the same y-buffer
+   technique Voxel_Render uses - so the water is seen from the side as
+   a landscape [verified].
+
+       DS = 0xa000        the screen, written directly
+       ES = g_WaterBufB   the height field
+
+   Per column, walking from the BOTTOM field row upward:
+
+       img 2a33  DI starts at 0x7bc0, word 15840, field row 99
+       img 2a38  EBP starts at 0xf8c0, 320*199, the bottom screen row
+       img 2a4a  the shade is (next column's height - this one) >> 7
+                 plus the row index, floored at 0 - A HORIZONTAL
+                 GRADIENT, which is a lighting term, PLUS depth
+       img 2a5c  BH = BL then BL += 3, so the word store lays two
+                 ADJACENT palette entries and img 0x2a83 XCHGs them
+                 each row: a dither between two shades
+       img 2a65  the screen y is EBP - (height << 4)
+       img 2a6f  fill upward from the previous y to this one
+       img 2a8b  EBP -= 0x280 - TWO screen rows per field row
+
+   Under Pal_SetRgbRamps' cold black-blue-cyan-white palette, with no
+   fire band at all, that is water.
+
+4.  Water_Refract - the finale
+
+   1000:2a99. The work buffer displaced onto the screen through the
+   field [verified].
+
+       ES = 0xa000        the screen
+       FS = g_WaterBufB   the height field
+       DS = 0x5a79        g_WorkSeg - THE SOURCE, holding the THE END
+                          letters over their plasma
+
+       ax = height >> 3
+       bx = di + ax + (ax << 6) + (ax << 8)   =  di + 321 * ax
+
+   321 IS 320 + 1, so the displacement runs along the screen DIAGONAL
+   - down and right together, in proportion to height. Refraction in
+   three shifts and three adds, with no trigonometry and no per-axis
+   split.
+
+   One field cell drives a 2x2 block: words written at DI and
+   DI + 0x140, DI stepping 2 per cell and another 0x140 added per row.
+
+   IT READS ONE FIELD ROW PAST THE GRID. SI starts at word 160, field
+   row 1, and walks 100 rows without resetting, so it ends on row 100
+   of a grid with rows 0 to 99. In real mode that reads whatever
+   follows the field in its segment. Harmless, and reproduced rather
+   than corrected in the transcription.
+
+   The only bounds handling anywhere is img 0x2ac7: an offset of
+   0xfd00 or more is reduced by 0x600.
+
+5.  What it looks like over time
+
+   Transcribed and run with mode 0x1c's drive [verified by
+   transcription]:
+
+   +--------+---------+-----------+--------------+-------------+
+   | ticks  | amp     | live cells| reach, cells | peak height |
+   +========+=========+===========+==============+=============+
+   |   300  |   300   |   269     |      9       |     258     |
+   |   600  |   600   |   945     |     19       |     364     |
+   |   900  |   900   |   389     |     12       |     383     |
+   |  1200  |  1200   |   593     |     14       |    1110     |
+   +--------+---------+-----------+--------------+-------------+
+
+   THE AMPLITUDE GROWS WITHOUT BOUND WHILE THE REACH DOES NOT. The
+   drive climbs forever but the damping holds the wave to roughly
+   fifteen cells of the centre, so the effect is not a spreading ring
+   - it is a small disc that becomes increasingly violent.
+
+   A peak height of 1110 feeds (1110 >> 3) * 321, about 44000 bytes of
+   displacement, which wraps the source image several times over. So
+   the centre of the screen tears itself apart while the edges stay
+   calm, and that is the demo's closing image.
+
+6.  The transcription
+
+   sim/xcursion/parts.py has water_step and water_refract, and
+   sim/xcursion/demo.py part 20 is the finale: Mesh_Draw into a work
+   buffer, Water_Step, Water_Refract to the screen, driven at the
+   centre cell exactly as mode 0x1c drives it. Z resets it.
+
+   src/xcursion/xcursion_water.c has Xcur_WaterStep and
+   Xcur_WaterRenderSpans, with Xcur_PalSetRgbRamps in xcursion_pal.c
+   and the part as scene 22 of xcursion_demo.c. ITS DRIVE IS THE
+   DEMO'S: the sequencer keeps each channel's note age and sample step
+   and mode 0x12 reads them, so nothing about the drips is invented.
+
+   THE STEPS ARE EXACT. Read out of a running demo at order 0x2b, all
+   eight channels' steps match src/'s to the dword - 0x229b8, 0xb92c,
+   0x2e4bc, 0xc438, 0x12224, 0x57624, 0xc438, 0xa4f8 [observed] - so
+   the period table, the octave shift, both divides and the final
+   shift are all right, and with them every drip's column.
+
+   water_render_spans is transcribed in sim/ too, and
+   sim/xcursion/demo.py part 22 is the sync 0x2d scene.
+
+   THE PALETTE AND THE DRIVE ARE STILL OURS IN sim/, and its window
+   title says so: part 22 shows the palette index rather than
+   Pal_SetRgbRamps' ramp, and pokes the centre cell the way mode 0x1c
+   does - which is the FINALE's driver, not this part's.
+
+   The y-buffer is the detail worth checking in the transcription: ESI
+   is set once per column and only ever decreases, so each column
+   fills bottom-up and nothing is overdrawn. Run against the finale's
+   wave it fills all 64000 pixels with 104 distinct shades.
+
+   The water field lists are padded by TWO rows. Both Water_Step and
+   Water_Refract process field rows 1 to 100 of a 0 to 99 grid -
+   img 0x29de counts 0x3e80 cells from word 160, and img 0x2aaa walks
+   100 rows without resetting SI - and Water_Step's +0x140 neighbour
+   read reaches a row beyond that again. Reproduced, not tidied.
+
+7.  Open questions
+
+   o Whether g_WaterDamping is ever changed from 4. It is a byte with
+     no writer found.
+
+   o Water_Run waits a tick per render at img 0x29c5, so the solver
+     advances once per render and the drips once per animation pass -
+     the same rate question the rotozoom and the beams have. Unmeasured
+     here, because the scene has no second counter to measure it
+     against.
+
+8.  The drips - the mode 0x12 handler
+
+   img 0x166f, and it IS the sync 0x2d scene's driver [verified].
+
+   THE EIGHT SLOTS ARE THE EIGHT MUSIC CHANNELS. That is the whole
+   point of the handler and it is easy to read as a drop table
+   instead. cs:0x9388 is a per-channel counter that the SEQUENCER'S
+   NOTE DECODER arms to 0x10 at img 0x0d26, and nothing else in the
+   image reads or writes it - mode 0x12 is its only consumer. And
+   cs:0x93c8 is that channel's SAMPLE STEP, written by the sample
+   setup at img 0x22cf.
+
+   SO THE MUSIC IS THE ONLY THING DRIVING THE WATER. Every note arms
+   its channel's drip for sixteen ticks, each channel owns one row,
+   and THE NOTE'S PITCH SETS THE COLUMN because the column comes off
+   the step. Nothing here is on a timer and nothing is random.
+
+   THE TIMING AGREES. Mode 0x12's parts are sync 0x2b and sync 0x2d,
+   and sync 0x2d's runner is Water_Run - so the handler runs exactly
+   while the water does, and in no other part.
+
+   AND SO DOES THE SEGMENT. img 0x1677 loads DS from g_WaterBufA,
+   which is the buffer Water_Step is about to WRITE - so a drop lands
+   in the frame being computed rather than the one being read.
+
+   Per channel, four bytes apart:
+
+       if g_DropLife[n] == 0: skip                      img 167c
+       g_DropLife[n]--                                  img 1684
+       di = (g_DropPos[n] >> 9) & 0xfffe                img 1689
+       word [0x2d00 + n*0xa00 + di - 0xa0] = 0xfc00     img 1696
+
+   ON THE 160x100 WORD GRID THE BASE IS ROW 35 + 8n, COLUMN 80 -
+   eight rows evenly eight apart straight down the CENTRE COLUMN
+   [verified]:
+
+       channel  0    1    2    3    4    5    6    7
+       row     35   43   51   59   67   75   83   91
+
+   BUT THE STEP CAN CARRY A DRIP OFF ITS OWN ROW. The offset is only
+   masked to 16 bits, so a column displacement past 160 words lands in
+   a later row instead of being clamped. Read out of a running demo,
+   row 35 held two live ripples at columns 57 and 106 and none at 80
+   [observed]. Clamping the column to its row is the tempting fix and
+   it is not what the demo does.
+
+   0xFC00 AS A SIGNED WORD IS -1024 - A DENT, NOT A BUMP. A falling
+   drop pushes the surface down, and getting the sign wrong would give
+   eight rising columns instead of eight impacts.
+
+   SHR EDI, 9 IS AN UNSIGNED 32-BIT SHIFT, img 0x168f, and img 0x1693
+   then keeps DI's low 16 bits - so a negative position shifts as a
+   large unsigned and WRAPS the column. Reproduced, not corrected.
+
+   The counter is set to 0x10 at img 0x0d26, so a drop pokes for
+   sixteen ticks and stops. img 0x225f is the sample setup that fills
+   the step, and the note decoder calls it at img 0x0d2d immediately
+   after arming the counter - so the two always move together.
+
+   The step is the standard S3M rate, img 0x228e:
+
+       period = the table at img 0x97e1, indexed by note & 0xf
+       t      = (period * 0x20ab0) >> (note >> 4)     unsigned
+       q      = t / the instrument's c2speed at +0x20
+       step   = (0xda7600 / q) << 2

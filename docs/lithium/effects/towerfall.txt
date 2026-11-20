@@ -1,0 +1,207 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                   LITHIUM: THE TOWER FALLS
+
+
+Abstract
+
+   The second half of scene 2.12. A craft fires rounds at a tower,
+   and after the third hit the tower burns.
+
+   SLOT 0x10 IS THE ROUND, NOT THE TOWER. The runner parks it at the
+   origin and nothing moves it until command 0x1a copies the firing
+   craft's drawn position and attitude into it. The tower is slot 8,
+   a mesh at a fixed base that does not move at all until the third
+   impact.
+
+   THERE IS NO ANIMATION AND THERE ARE NO KEYFRAMES. The round flies
+   because the FLIGHT MODEL is pointed at it: Flight_StepRoll carries
+   it along its own heading and rolls it a fixed amount every tick,
+   and the tick handler winds its speed up as it goes.
+
+   THE IMPACT IS A GRID CELL. Two shifted compares against a fixed
+   cell decide when the round has arrived; nothing measures a height
+   and nothing consults the tower.
+
+   All [verified] from the two routines unless marked.
+   effects/trail.txt is the debris, effects/flight.txt the rotation.
+
+Table of Contents
+
+   1. maybe_Scene_TowerFall
+   2. Tick_TowerFall
+   3. How it falls
+   4. The impact and what follows it
+      4.1. At three impacts the tower becomes an emitter
+   5. The flare's visibility is eased here
+   6. Open questions
+
+1.  maybe_Scene_TowerFall
+
+   1000:21eb, from the main script at 1000:0350. A camera and a draw
+   list, nothing more.
+
+       cs:[0x9025] = 1;  g_SceneDone = 0      the planar pass, below
+       five slots - 0, 4, 8, 0xc, 0x10 - reset and placed
+       cs:[0x8f8c] = 0x99be;  cs:[0x8f80] = 0x1fbd
+       fill 0x4ad2 with 0x80808080
+       zero 0x8ad2:0x7a80 for 0x580 bytes          the trail ring
+       g_PalFadeTarget2 = g_PalFade = 0;  Pal_Upload
+       the fade shift = 3
+       g_TickHandler = Tick_TowerFall
+       loop:
+           Terrain_Build
+           three objects - slots 4, 8 and 0x10, the last textured
+               from 0x6ad2, the sphere map
+           the camera angles, then 1000:2e48 and 1000:31c7
+           Sky_SunAndStars;  Flare_Render
+           Trail_Draw
+           1000:34d1;  Demo_PollKeys
+       until g_SceneDone != 0
+
+   NOTHING IN THE LOOP SETS g_SceneDone. The scene ends when the tick
+   handler decides, which is how every runner in this demo waits on
+   the music rather than on a frame count.
+
+   Clearing 0x580 bytes at 0x7a80 is the trail ring - 64 records of
+   22 - so the scene opens with no debris alive.
+
+   THE PLANAR SHADOW PASS IS TURNED ON HERE. cs:[0x9025] is read by
+   Scene_DrawFaces at img 0x342e, not by the flight model, and
+   maybe_Scene_Battle is the only routine that clears it - so the
+   craft lays a shadow on the terrain in this scene and not in the
+   one before. subsystems/raster.txt 3.3.
+
+   THE RUNNER PRIMES THE CUT LATCH at img 0x2353, the same guard the
+   battle needs at img 0x1fe9: the music order has just advanced to
+   bring the scene in, so without it the handler would cut on its
+   first tick. Section 2 - and here the cut trades slot 0 with slot
+   0xc, where the battle traded with 0x1c.
+
+2.  Tick_TowerFall
+
+   1000:6756.
+
+       cs:[0x8fe6]++;  every 8th tick, decrement cs:[0x8fe4]
+       if cs:[0x8de3] - 0xa611 >= 0x2f8:
+           g_PalFadeTarget2 = 0x100;  the fade shift = 0xa
+       Flicker_Step
+       for slots 0, 4 and 0xc:  Track_Play, then Flight_Step
+       ... the topple, section 3 ...
+       g_FlareEnergy += (g_SunVisible - g_FlareEnergy) >> 2
+       Trail_Step
+       if g_TowerImpacts >= 3:  shake the camera
+
+   The three slots that get Flight_Step are the craft; the tower is
+   slot 0x10 and is handled separately.
+
+3.  How it falls
+
+   Only while g_TowerFalling is 1, which A RECORDED KEYSTROKE sets:
+   command 0x1a at img 0x5cdd copies the firing craft's drawn
+   position and all three angles into slot 0x10, drops it 0x2bc,
+   zeroes its speed and arms it - effects/tracks.txt section 4. The
+   command names no target and reads no tower; the round is launched
+   from whichever slot executed it, which is why a shot leaves the
+   craft rather than starting on a timer.
+
+       si = 0x10
+       Flight_StepRoll
+       g_SlotSpeed++                          rising
+       g_SlotTrack++                          the track cursor
+       every 8th tick:
+           Trail_Spawn;  life 0x32000;  velocity (0, 0x80, 0)
+
+   FLIGHT_STEPROLL IS WHAT FLIES IT. It carries the slot along its
+   own heading and adds 0x40 to its roll every tick with nothing
+   easing it back - effects/flight.txt section 4 - a full revolution
+   every 32 ticks. On a craft that would be a useless constant barrel
+   roll; on a round in flight it is a spin.
+
+   The speed is incremented here rather than eased, so the round
+   accelerates away from the craft that fired it.
+
+   THE TRACK CURSOR IS REUSED AS A COUNTER. img 0x67c9 increments
+   only the LOW BYTE of g_SlotTrack and tests three bits of it: the
+   round plays no recording, so the cursor is free to be the
+   eight-tick timer for its exhaust.
+
+   That exhaust is one particle every eighth tick with an EVEN life,
+   so it is the weightless kind that brightens without falling -
+   effects/trail.txt section 4.
+
+4.  The impact and what follows it
+
+       eax = (cs:[0x89d9] + 0x4000) >> 0xf
+       edx = (cs:[0x8a11] + 0x4000) >> 0xf
+       if eax == 8 and edx == 0xd:
+           cx = 0x32;  si = 0x10;  Trail_SpawnBurstBig
+           cs:[0x8a11] = 0
+           g_TowerFalling = 0;  g_TowerImpacts++
+
+   THE ARRIVAL TEST IS A GRID CELL, NOT A HEIGHT. The round's two
+   horizontal coordinates are biased by 0x4000 and shifted down 15,
+   and the burst fires when they equal 8 and 0xd exactly - two
+   compares, no terrain lookup and no reference to the tower, which
+   sits one cell further on at (8, 0xe). The round bursts where the
+   author put the target.
+
+   Fifty big particles, all odd-lifed, so they fall and burn their
+   own colour into the top palette band.
+
+   4.1.  At three impacts the tower becomes an emitter
+
+      g_TowerImpacts counts the bursts, and from the third one the
+      tick handler stops leaving slot 8 alone:
+
+          slot 8's home x, z and y += a signed Rnd_NextB halved
+          cx = 1;  si = 8;  Trail_SpawnBurstBig
+          that particle's vel y += 0x200
+          slot 8's pitch += 3
+          slot 8's x and z = 0x40000 and 0x6c000, y = the terrain
+          rotate (0, 0x7480, 0) by the slot's angle x and TWICE its
+              angle z, shift all three down 6
+          x = 0x40000 - x;  z = 0x6c000 + z;  y += the rotated y
+          write all three back to both flown and drawn
+
+      THE JITTER IS NOT A SHAKE AND IT IS NOT THE CAMERA. It is slot
+      8, and everything after it overwrites the three nudged values -
+      so their only effect is on the ONE particle taken from the slot
+      in between. The three random adds exist to scatter the spawn
+      point and nothing else.
+
+      THE EMITTER WALKS AROUND THE BASE. The vertical 0x7480 is
+      turned by the slot's own attitude, and since the pitch rises by
+      3 a tick the offset sweeps - so the debris leaves a ring rather
+      than a column. The slot is no longer drawn as a tower standing
+      still; it is a moving spawn point that happens to use the same
+      mesh.
+
+5.  The flare's visibility is eased here
+
+       g_FlareEnergy += (g_SunVisible - g_FlareEnergy) >> 2
+
+   g_SunVisible is the result of Sky_SunAndStars' one-pixel
+   occlusion test, and it is 0x8000 when the sun is BLOCKED and 0
+   when it is clear - effects/sky.txt section 3.
+
+   SO THE FLARE FADES RATHER THAN POPPING. Flare_Render returns
+   without drawing once g_FlareEnergy reaches 0x7f00, which is a test
+   for "nearly fully blocked", and the quarter-step ease is what
+   carries it there over several frames as the sun slides behind the
+   terrain.
+
+   This is the only writer of g_FlareEnergy found.
+
+6.  Open questions
+
+   o cs:[0x8de3], compared against 0xa611 + 0x2f8 to trigger a fade.
+     0xa611 is also the track cursor the runner gives slot 4, so the
+     fade is cued by how far through its recording that craft is.
+
+   o Which slot fires the shot that topples it. Command 0x1a names no
+     target - it copies whichever slot executed it.
+
+   o Which slot's recording carries the 0x1a commands, and how many
+     rounds the scene fires in all.

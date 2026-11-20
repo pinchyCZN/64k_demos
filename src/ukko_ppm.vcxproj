@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- UKKO - the no-dependency target.
+
+     THE ONLY TARGET THAT BUILDS ON A MACHINE WITH NO SDL. It renders
+     frames to P6 PPM files, which keeps the demo core honest about
+     the host boundary and gives tools/ctest_ukko.py something to diff
+     against sim/ukko/ frame for frame.
+
+     NO CMAKE, deliberately - see ukko.vcxproj. -->
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32"><Configuration>Debug</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>15.0</VCProjectVersion>
+    <ProjectGuid>{B2D15F8C-A043-4E67-9F21-22C3D4E5F607}</ProjectGuid>
+    <RootNamespace>ukko_ppm</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.17134.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v141</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)..\build\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)..\build\obj\ukko_ppm\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>ukko_ppm</TargetName>
+    <!-- The demo reads reverse/ghidra/UKKO.EXE by a relative path, so
+         debug from the repository root, not from src/. -->
+    <LocalDebuggerWorkingDirectory>$(ProjectDir)..</LocalDebuggerWorkingDirectory>
+    <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <CompileAs>CompileAsC</CompileAs>
+      <WarningLevel>Level4</WarningLevel>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
+    <ClCompile><Optimization>Disabled</Optimization><RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary></ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
+    <ClCompile><Optimization>MaxSpeed</Optimization><FunctionLevelLinking>true</FunctionLevelLinking><IntrinsicFunctions>true</IntrinsicFunctions><RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary></ClCompile>
+    <Link><EnableCOMDATFolding>true</EnableCOMDATFolding><OptimizeReferences>true</OptimizeReferences></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <!-- Vendored and not ours to tidy: /W4 flags narrowing
+         that its own -ansi -pedantic -Wall build accepts. -->
+    <ClCompile Include="third_party\ibxm\ibxm.c">
+      <WarningLevel>Level1</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="main_ppm.c" />
+    <ClCompile Include="pklite.c" />
+    <ClCompile Include="ukko\ukko_demo.c" />
+    <ClCompile Include="ukko\ukko_game.c" />
+    <ClCompile Include="ukko\ukko_line.c" />
+    <ClCompile Include="ukko\ukko_music.c" />
+    <ClCompile Include="ukko\ukko_pose.c" />
+    <ClCompile Include="ukko\ukko_scene.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="pd.h" />
+    <ClInclude Include="host.h" />
+    <ClInclude Include="pklite.h" />
+    <ClInclude Include="ukko\ukko.h" />
+    <ClInclude Include="ukko\ukko_game.h" />
+    <ClInclude Include="ukko\ukko_assets.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

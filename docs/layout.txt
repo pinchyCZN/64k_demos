@@ -1,0 +1,238 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                   THE LAYOUT, AND WHY IT SPLITS HERE
+
+
+Abstract
+
+   Five programs share one Ghidra project and one set of tools. This
+   document says which material belongs to a demo, which is shared,
+   and where each goes - and records the migration that put it there.
+
+   THE SPLIT IS NOT TWO-WAY. Three of the demos are packed with the
+   SAME packer, byte for byte, so the packer notes and that depacker
+   are shared infrastructure and not XCURSION's. Section 2.
+
+   UKKO IS SHARED WITH NONE OF IT. Different group, two years
+   earlier, PKLITE instead, and no engine in common - so it gets its
+   own everything. Section 7.
+
+Table of Contents
+
+   1. The three layers
+   2. The shared packer
+   3. The layout
+   4. What decided it
+   5. The migration
+   6. Open questions
+   7. UKKO, which shares nothing
+
+1.  The three layers
+
+   +---------------+------------------------------------------------+
+   | Layer         | What is in it                                  |
+   +===============+================================================+
+   | shared        | the conventions, the packer format, the        |
+   |               | depacker, every generic tool, the Ghidra       |
+   |               | export scripts, the sim harness, CLAUDE.md's   |
+   |               | rules                                          |
+   +---------------+------------------------------------------------+
+   | per demo      | effect and subsystem notes, struct notes, the  |
+   |               | demo's own asset formats, the sim's part list  |
+   |               | and transcriptions, the demo's verified facts  |
+   +---------------+------------------------------------------------+
+   | per program,  | reverse/exports/<PROGRAM>/ and                 |
+   | already keyed | reverse/unpacked/<demo>.* - these needed no    |
+   |               | change, they were keyed by name from the start |
+   +---------------+------------------------------------------------+
+
+   The third row is why a demo's material is in more than one place
+   and that is correct rather than untidy: the generated maps belong
+   next to the database they come from, and they already carry the
+   program name.
+
+2.  The shared packer
+
+   UKKO.EXE IS NOT PART OF THIS - it is PKLITE, section 7.
+
+   The decompressor at image offset 0x54 to 0x29c is BYTE-IDENTICAL
+   across XCURSION.EXE, LITHIUM.EXE and DRAIN.EXE - sha256 begins
+   9071a0554cd2 in all three [verified]. Over the whole first 0x29c
+   bytes only FOUR differ, which are the relocate-and-enter
+   preamble's target segment and the compressed size.
+
+   All three also share:
+
+       an 8-paragraph MZ header
+       ZERO relocations
+       CS:IP = segment:0000
+       the string "!Not enough memory$" at image offset 0
+
+   +---------------+---------+--------------+------------------------+
+   | File          | Bytes   | Image bytes  | CS:IP                  |
+   +===============+=========+==============+========================+
+   | XCURSION.EXE  | 49,761  | 49,633       | 0be1:0000              |
+   | LITHIUM.EXE   | 63,281  | 63,153       | 0f30:0000              |
+   | DRAIN.EXE     | 65,536  | 65,408       | 0f40:0000              |
+   +---------------+---------+--------------+------------------------+
+
+   SO THE DEPACKER AND ITS NOTES ARE SHARED. tools/unpack/ should
+   depack all three with per-file parameters, and the packer document
+   describes the packer all of them use rather than one demo's - so it
+   keeps the shared formats directory and carries no demo name.
+
+   That is the one thing that stopped this being a clean two-way
+   split, and it is worth stating because the file NAME said
+   otherwise.
+
+3.  The layout
+
+       CLAUDE.md                  the shared rules, and nothing
+                                  demo-specific
+       docs/
+         README.txt               doc conventions and evidence tags
+         layout.txt               this file
+         web.txt                  THE SHARED BROWSER BUILD
+         formats/
+           packer.txt             THE SHARED PACKER
+         xcursion/
+           README.txt             XCURSION's verified facts and status
+           effects/ subsystems/ structs/ formats/
+         lithium/
+           README.txt
+           effects/ subsystems/ structs/ formats/
+       sim/
+         harness.py               Screen, the blit, the frame loop,
+                                  the GENERIC keys
+         run.py                   the entry point: run.py <demo>
+         xcursion/
+           parts.py               the transcriptions
+           demo.py                the part list and the demo keys
+       tools/                     all shared; see CLAUDE.md
+       reverse/                   unchanged
+         ghidra/                  the project and the four binaries
+         unpacked/                per demo, already named
+         exports/<PROGRAM>/       per program, already keyed
+
+   A DEMO'S DOC ROOT SITS EXACTLY WHERE docs/ SAT, which is what let
+   119 relative cross-references survive the move untouched - section
+   4.
+
+4.  What decided it
+
+   Three constraints, in the order they mattered.
+
+   o 119 CROSS-REFERENCES. The docs refer to each other by a path
+     relative to the DEMO ROOT, not to the file's own directory -
+     119 of them, only 9 with a docs prefix and none naming
+     README.txt. Any layout that keeps a demo's doc root one level
+     deep keeps all 119 valid; folding the demo name into each
+     filename instead would have meant editing every one.
+
+     VERIFIED AFTER THE MOVE: tools/checkrefs.py resolves all 119
+     against the demo root and reports none broken. It is worth
+     keeping in the closing checklist for that reason.
+
+   o THE PACKER IS SHARED. Section 2. That removed the argument for
+     putting the depacker under a demo folder, which in turn removed
+     most of the reason to make the demo folders top-level.
+
+   o THE TOOLS ARE ALREADY DEMO-AGNOSTIC. gq.py, export_maps.py and
+     structmap.py all take a program selector, and asciify, rfcfmt and
+     commentbudget walk directories recursively. Only the sim needed
+     splitting, and only because it had the harness and the part list
+     in one file.
+
+   The alternative considered was a top-level xcursion/ and lithium/
+   holding docs and sim each. It reads better in a directory listing,
+   but it moves more, leaves reverse/ outside either folder, and
+   splits tools/ in two once a demo needs its own - which the shared
+   packer says it does not.
+
+5.  The migration
+
+   Done in this order, with git committed first so the moves were
+   recoverable:
+
+       1  DONE  24 docs moved to docs/xcursion/
+       2  DONE  mesh.txt moved to docs/xcursion/formats/
+       3  DONE  the packer doc lost its demo name, staying shared
+       4  DONE  the packer refs repointed; tools/checkrefs.py added
+                and reports 116 refs, 0 unresolved
+       5  DONE  CLAUDE.md 904 -> 841 lines; XCURSION's facts are now
+                docs/xcursion/README.txt and CLAUDE.md has no
+                demo-specific path left
+       6  DONE  sim/harness.py (Screen + the loop + generic keys),
+                sim/xcursion/{parts,demo}.py, sim/run.py
+       7  DONE  docs/lithium/README.txt with the header facts and the
+                shared-packer finding
+
+   VERIFIED AFTER THE MOVE: all 25 sim parts step clean headlessly,
+   all 20 demo keys run in both cases, asciify reports 0 violations
+   and checkrefs 0 unresolved.
+
+   THE SIM SPLIT FIXED A BUG AS A SIDE EFFECT. Eleven key handlers in
+   main() used `self.` where no self existed - O, P, J, Z, X, V, N, B,
+   W, A and S - so each raised NameError when pressed, which Tkinter
+   swallows. Moving them onto the Demo class as a key() method makes
+   `self` correct by construction, which is the structural reason to
+   do it rather than a tidiness one.
+
+6.  Open questions
+
+   o DRAIN.EXE has not been depacked. XCURSION.EXE and LITHIUM.EXE
+     both depack with tools/unpack/ and nothing but the input named -
+     no per-file stop address, no per-file stream offset [verified],
+     which is section 2's claim holding for two of the three.
+
+     Ending the image at its last non-zero byte is wrong whenever the
+     image ends in zeros, and Lithium's does. formats/packer.txt
+     section 6.1.
+
+   o docs/xcursion/structs/ is empty and always has been. No struct
+     notes were ever written; the types live in the Ghidra database
+     and reach the maps through the exporter instead. Worth deciding
+     whether that directory is a convention to keep or a leftover.
+
+   o Whether the sim's shared layer is the right size. harness.py has
+     the Screen and the frame loop; the palette helpers, the
+     framebuffer conventions and the fixed-point helpers are still in
+     each demo's parts.py. If Lithium turns out to share the sine
+     table or the plasma, some of that wants promoting.
+
+     The contract a demo's parts module owes the harness is small and
+     worth keeping that way: SCREEN_W, SCREEN_H, pal_build_main and
+     pal_to_rgb. The Demo class owes parts, index, frame, paused,
+     status, select, advance, reseed, step and key.
+
+   o parts.py now finds the repo root by walking up for CLAUDE.md
+     rather than counting '..' segments. It had a hardcoded '..' that
+     broke silently when the module moved one level deeper, which is
+     the kind of thing that only shows up as a missing data file.
+
+7.  UKKO, which shares nothing
+
+   UKKO.EXE is a 1995 release by a different group and has no
+   material in common with the other three.
+
+   +---------------------+-------------------+--------------------+
+   | What                | The other three   | UKKO               |
+   +=====================+===================+====================+
+   | packer              | LZEXE derivative  | PKLITE 1.15        |
+   | MZ header           | 8 paragraphs      | 10 paragraphs      |
+   | depacker            | xcur_unpack.py    | ukko_unpack.py     |
+   | packer notes        | formats/packer.txt| ukko/README.txt 2  |
+   | dated               | 1996 - 1997       | 1995-08-11         |
+   +---------------------+-------------------+--------------------+
+
+   SO IT GETS ITS OWN TREE AND ITS OWN DEPACKER. docs/ukko/ holds
+   everything about it, including its packer notes, because nothing
+   else in the project uses PKLITE and putting them in
+   docs/formats/ would imply they were shared.
+
+   ITS STRUCT AND TYPE PREFIX IS Ukko_, by rule 6.1.
+
+   The shared material it DOES use is the tooling that is not
+   demo-specific: asciify, checkrefs, journalcheck, structmap, the
+   map exporter and the sim harness.

@@ -1,0 +1,97 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!-- XCURSION - the no-dependency target, the test bench. One demo per executable: the
+     hosts plus this demo's sources. It links xcurpack.c where ukko
+     links pklite.c - a different packer, docs/layout.txt section 7.
+
+     NO CMAKE, deliberately - see ukko.vcxproj. -->
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32"><Configuration>Debug</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>15.0</VCProjectVersion>
+    <ProjectGuid>{D4F37BAE-C265-4089-B143-44E5F6071829}</ProjectGuid>
+    <RootNamespace>xcursion_ppm</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.17134.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v141</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)..\build\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)..\build\obj\xcursion_ppm\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>xcursion_ppm</TargetName>
+    <!-- The demo reads reverse/ghidra/XCURSION.EXE by a relative path, so
+         debug from the repository root, not from src/. -->
+    <LocalDebuggerWorkingDirectory>$(ProjectDir)..</LocalDebuggerWorkingDirectory>
+    <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <CompileAs>CompileAsC</CompileAs>
+      <WarningLevel>Level4</WarningLevel>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
+    <ClCompile><Optimization>Disabled</Optimization><RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary></ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
+    <ClCompile><Optimization>MaxSpeed</Optimization><FunctionLevelLinking>true</FunctionLevelLinking><IntrinsicFunctions>true</IntrinsicFunctions><RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary></ClCompile>
+    <Link><EnableCOMDATFolding>true</EnableCOMDATFolding><OptimizeReferences>true</OptimizeReferences></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <!-- Vendored and not ours to tidy: /W4 flags narrowing
+         that its own -ansi -pedantic -Wall build accepts. -->
+    <ClCompile Include="third_party\ibxm\ibxm.c">
+      <WarningLevel>Level1</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="main_ppm.c" />
+    <ClCompile Include="xcurpack.c" />
+    <ClCompile Include="xcursion\xcursion_demo.c" />
+    <ClCompile Include="xcursion\xcursion_play.c" />
+    <ClCompile Include="xcursion\xcursion_look.c" />
+    <ClCompile Include="xcursion\xcursion_music.c" />
+    <ClCompile Include="xcursion\xcursion_seq.c" />
+    <ClCompile Include="xcursion\xcursion_planet.c" />
+    <ClCompile Include="xcursion\xcursion_ground.c" />
+    <ClCompile Include="xcursion\xcursion_roto.c" />
+    <ClCompile Include="xcursion\xcursion_warp.c" />
+    <ClCompile Include="xcursion\xcursion_moire.c" />
+    <ClCompile Include="xcursion\xcursion_battle.c" />
+    <ClCompile Include="xcursion\xcursion_beams.c" />
+    <ClCompile Include="xcursion\xcursion_tunnel.c" />
+    <ClCompile Include="xcursion\xcursion_water.c" />
+    <ClCompile Include="xcursion\xcursion_pal.c" />
+    <ClCompile Include="xcursion\xcursion_plasma.c" />
+    <ClCompile Include="xcursion\xcursion_text.c" />
+    <ClCompile Include="xcursion\xcursion_voxel.c" />
+    <ClCompile Include="xcursion\xcursion_scroll.c" />
+    <ClCompile Include="xcursion\xcursion_mesh.c" />
+    <ClCompile Include="xcursion\xcursion_countdown.c" />
+    <ClCompile Include="xcursion\xcursion_tables.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="pd.h" />
+    <ClInclude Include="host.h" />
+    <ClInclude Include="xcurpack.h" />
+    <ClInclude Include="xcursion\xcursion.h" />
+    <ClInclude Include="xcursion\xcursion_assets.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

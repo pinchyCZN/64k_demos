@@ -1,0 +1,273 @@
+PCDEMOS 64k                                            Analysis Note
+
+
+                  EXCURSION: THE SCENE LIST, AS SEEN
+
+
+Abstract
+
+   The demo's visible sequence, reported from watching it [observed],
+   set against the parts and renderers found by reading the binary.
+
+   THIS DOCUMENT IS A JOINING TABLE AND NOTHING ELSE. The observations
+   are evidence for deciding what to go and read; they are never a
+   licence to implement what was seen. CLAUDE.md rule 12. Every
+   mechanism claim here points at the document that earned it.
+
+   Three scenes it settles, and one error it exposed, are in section 3.
+
+Table of Contents
+
+   1. The sequence
+   2. What is still unexplained
+   3. What the sequence settled
+   4. Open questions
+
+1.  The sequence
+
+   Left column [observed]; right column the mechanism and where it is
+   written up. "-" means no mechanism identified yet.
+
+   +----------------------------------+--------------------------------+
+   | What is on screen                | Mechanism                      |
+   +==================================+================================+
+   | voxel landscape, flame text      | FireText_Render + Voxel_Render |
+   | "ISN'T VERY PROUD TO PRESENT"    | sync 0x04. Mode 0 steps the    |
+   |                                  | captions; effects/firetext.txt |
+   +----------------------------------+--------------------------------+
+   | camera freezes on landscape and  | Countdown_Render, sync 0x07.   |
+   | ship; 4-3-2-1 countdown          | effects/countdown.txt          |
+   +----------------------------------+--------------------------------+
+   | camera and ship move, text       | the "bEXCURSION" banner record |
+   | "EXCURSION" fades to white       | at cs:0x97cb                   |
+   +----------------------------------+--------------------------------+
+   | higher view, ship leaving the    | GROUND_RENDER sync 0x0a, a     |
+   | planet                           | SECOND landscape renderer, +   |
+   |                                  | Mesh_Draw. effects/ground.txt  |
+   +----------------------------------+--------------------------------+
+   | planet and stars, ship leaving   | PLANET_RENDER sync 0x0c - the  |
+   | into space                       | mapped sphere. effects/        |
+   |                                  | planet.txt                     |
+   +----------------------------------+--------------------------------+
+   | cuts of a rotozoomer with "HUI"  | Roto_Render, sync 0x0d/0x0e.   |
+   | over it, timed to the music      | THE LETTERS ARE IN THE         |
+   |                                  | TEXTURE: Text_BuildBanner      |
+   |                                  | blends them into 0x2a79 at img |
+   |                                  | 0x0335, which is what the      |
+   |                                  | rotozoom samples               |
+   +----------------------------------+--------------------------------+
+   | moving plasma with occasional    | Plasma_Generate, sync 0x12;    |
+   | flashes                          | mode 7 is a fade-only handler  |
+   +----------------------------------+--------------------------------+
+   | MOIRE PATTERN - lines squeezing  | MOIRE_RENDER at 1000:2818,     |
+   | together and expanding           | sync 0x14. The lines are an    |
+   |                                  | 8-bit WRAP, not drawn at all.  |
+   |                                  | effects/moire.txt              |
+   +----------------------------------+--------------------------------+
+   | cuts of the space ship           | Planet_Render with the ball    |
+   |                                  | suppressed, sync 0x15/0x16     |
+   +----------------------------------+--------------------------------+
+   | two ships battling, lasers and   | Battle_Run, sync 0x19/0x1b/    |
+   | blasts; a long scene             | 0x21. effects/battle.txt       |
+   +----------------------------------+--------------------------------+
+   | plasma rotozoomer                | Roto_Render, sync 0x26         |
+   +----------------------------------+--------------------------------+
+   | ROTATING LINES                   | Beams_Render, sync 0x28/0x29 - |
+   |                                  | and they reverse between the   |
+   |                                  | two. effects/beams.txt         |
+   +----------------------------------+--------------------------------+
+   | a tunnel, ship flying through it | TUNNEL_RENDER sync 0x2a/0x2b,  |
+   |                                  | and Tunnel_Run calls Mesh_Draw |
+   |                                  | after it - THAT is the ship.   |
+   |                                  | effects/tunnel.txt             |
+   +----------------------------------+--------------------------------+
+   | DRIPPING WATER                   | WATER_STEP, a real 2D wave     |
+   |                                  | solver, drawn as column spans  |
+   |                                  | by Water_RenderSpans at sync   |
+   |                                  | 0x2d. effects/water.txt        |
+   +----------------------------------+--------------------------------+
+   | ship flying through the tunnel   | Tunnel_Render again at sync    |
+   |                                  | 0x32, after the water          |
+   +----------------------------------+--------------------------------+
+   | out of the tunnel into stars     | THE EXIT IS IN THE TUNNEL: img |
+   |                                  | 0x2b8f blacks it out from the  |
+   |                                  | middle as g_TunnelFade falls.  |
+   |                                  | effects/tunnel.txt section 5   |
+   +----------------------------------+--------------------------------+
+   | grey moon with stars, ship flies | PLANET_RENDER sync 0x34 with   |
+   | down to it                       | Pal_BuildGreyLow - THE SAME    |
+   |                                  | BALL as the first planet.      |
+   |                                  | effects/planet.txt             |
+   +----------------------------------+--------------------------------+
+   | close ground rotating, voxel-    | ROTO_RENDER sync 0x35 over the |
+   | like, ship heading down          | TERRAIN SHADE MAP, copied into |
+   |                                  | 0x2a79 at img 0x4f2c, plus     |
+   |                                  | Mesh_Draw. Section 3.6         |
+   +----------------------------------+--------------------------------+
+   | side view, ship along the ground | Landscape_Run sync 0x37, with  |
+   |                                  | mode 0x16's RECORDED FLIGHT    |
+   |                                  | TRACK. effects/flight.txt      |
+   +----------------------------------+--------------------------------+
+   | the ship lands                   | mode 0x16's terrain collision, |
+   |                                  | which levels the craft out     |
+   +----------------------------------+--------------------------------+
+   | A FLAG WAVING ON A POLE OVER THE | FLAG_RENDER at 1000:2504 -     |
+   | LANDSCAPE, "VISTA" ON THE FLAG   | the "VISTA" banner rippled by  |
+   |                                  | the sine field. 3.4 and        |
+   |                                  | effects/flag.txt               |
+   +----------------------------------+--------------------------------+
+   | parked ship, a TINY flag, and a  | Car_Run sync 0x3a. The tiny    |
+   | car riding and JUMPING along the | flag is MODEL 0x5be7 and is    |
+   | ground; fades to white           | static; the jumping is the     |
+   |                                  | spring at img 0x1a1d.          |
+   |                                  | effects/car.txt                |
+   +----------------------------------+--------------------------------+
+   | credits scroll over a starfield, | Scroller_Run sync 0x4a. THE    |
+   | ROCKING up and down rather than  | ROCK IS THE SINE WOBBLE that   |
+   | scrolling steadily               | outruns the base scroll -      |
+   |                                  | effects/scroller.txt 5         |
+   +----------------------------------+--------------------------------+
+   | "THE END" 3D letters tumble in,  | TheEnd_Run sync 0x4b, model    |
+   | then a WHITE FLASH snaps them    | 0x5c47, with the only animated |
+   | square over a red plasma         | light in the demo. The flash,  |
+   |                                  | the snap and the plasma are    |
+   |                                  | sync 0x4c. effects/theend.txt  |
+   +----------------------------------+--------------------------------+
+   | the background and letters fade  | THE SAME WAVE SOLVER, through  |
+   | with a WATER DROP from the       | Water_Refract. Mode 0x1c pokes |
+   | CENTRE of the screen             | the CENTRE CELL. 3.5 and       |
+   |                                  | effects/water.txt              |
+   +----------------------------------+--------------------------------+
+
+2.  What is still unexplained
+
+   o The ship flying through the tunnel, as a scene distinct from the
+     tunnel itself.
+
+   o The close-up rotating ground before the landing.
+
+   o Which part the "EXCURSION" fade-to-white belongs to. The banner
+     record exists at cs:0x97cb but nothing read so far points
+     g_BannerTextRec at it.
+
+3.  What the sequence settled
+
+3.1.  The moire pattern - RESOLVED
+
+   Moire_Render at 1000:2818. The earlier note guessed "the sum of two
+   sine gradients", which was close but wrong about what makes the
+   lines: the sines are only +/-15 and merely bend them. THE LINES ARE
+   THE MOD-256 WRAP OF AN ACCUMULATING RAMP, and nothing in the
+   routine plots an edge.
+
+   The squeeze is measurable: band width 320 px at frame 1, 2.2 px by
+   frame 120, widening to 4.5 px by frame 256 - so it squeezes AND
+   expands, as reported. effects/moire.txt.
+
+3.2.  The tunnel - RESOLVED
+
+   FUN_2bd4 is Tunnel_BuildDepth and the chain is read in full:
+   effects/tunnel.txt. The tunnel is Tunnel_Render at 1000:2b2d, which
+   samples a 256x256 texture through TWO full-screen tables supplying
+   the two halves of one 16-bit index - the angle as the low byte, the
+   depth as the high byte. Tunnel_Run calls Mesh_Draw after it, which
+   is the ship.
+
+   The observation that the ship flies through the tunnel is what made
+   the Mesh_Draw call in Tunnel_Run worth noticing rather than
+   dismissing as a leftover.
+
+   Two owners of cs:0xaf7c with different element widths is worth
+   stating plainly: the table is scratch, rebuilt per use, and the two
+   square roots that read it differ to match - one scans words
+   linearly, the other bisects dwords.
+
+3.3.  The dripping water - RESOLVED
+
+   FUN_29d4 is Water_Step, A 2D WAVE EQUATION SOLVER - not the
+   horizontal blur an earlier reading called it. Eleven instructions
+   over a 160x100 field of signed words, two buffers XCHG'd each step,
+   damped by a shift. effects/water.txt.
+
+   FUN_2a1a is Water_RenderSpans, which draws the field as COLUMN
+   SPANS - the same y-buffer technique as Voxel_Render, so the water
+   is seen from the side as a landscape, under Pal_SetRgbRamps' cold
+   palette.
+
+3.4.  The flag
+
+   THE FLAG IS Flag_Render AT 1000:2504.
+
+   g_TickCount COUNTS MUSIC ROWS, NOT TIMER TICKS - which is what
+   makes this a scene and not a transition. Timer_Isr increments it
+   at img 0x0cb7 only once g_RowTickCount reaches g_TicksPerRow,
+   statically 6, and
+   maybe_Music_Step zeroes it on each order change. So g_TickTarget
+   0x20 is 32 rows - half a pattern, seconds rather than a third of
+   one.
+
+   And what it ripples is the word VISTA: img 0x5116 points
+   g_BannerTextRec at cs:0x97d7, whose string at img 0xa590 is
+   "VISTA   !", and img 0x5123 calls Text_BuildBanner to draw it
+   first. The out-of-range fallback at img 0x2574 reads the WORK
+   BUFFER, which is what leaves the landscape visible around the flag.
+
+   THE TINY FLAG IN THE CAR SCENE IS A DIFFERENT THING - model 0x5be7,
+   a pole and a two-sided banner, geometrically static. Both readings
+   stand; there are two flags. effects/battle.txt section 4 describes
+   the model and effects/flag.txt the waving one.
+
+3.5.  The final water drop
+
+   Mode 0x1c at img 0x1c8f pokes ONE WORD at offset 0x3f20 of segment
+   g_WaterBufB with sin(phase) * amp >> 0xb, the amplitude
+   ramping every tick. 0x3f20 is word 8080 of a 160x100 grid - row
+   50, column 80, DEAD CENTRE.
+
+   The field is the wave solver's and the renderer is
+   Water_Refract at 1000:2a99, which displaces g_WorkSeg - holding the
+   THE END letters - along the screen diagonal by 321 per unit height.
+   The runner is TheEnd_RunWater at 1000:2358, called at img 0x53c1:
+   Mesh_Draw, Water_Step, Water_Refract.
+
+   effects/water.txt.
+
+3.6.  The close-up rotating ground
+
+   SYNC 0x35, and the texture question is what settles it [verified].
+
+   img 0x4f2c copies THE TERRAIN SHADE MAP from segment 0x4a79 - just
+   built by Terrain_BuildShade at img 0x4f15 - into 0x2a79, which is
+   the segment Roto_Render takes as its texture, and clears 0x7a79 and
+   g_WorkSeg on the way past. So the part rotozooms the terrain's own
+   shading.
+
+   Its runner is Roto_RunWithMesh at img 0x4f5e, which adds Mesh_Draw
+   - the craft over the ground - and mode 0x15 decrements g_RotoZoom
+   every other tick from the 0x200 set at img 0x4eda, so it zooms in.
+
+   A rotozoom of the terrain, with the craft above it, moving closer.
+   Every scene in section 1 now has a mechanism.
+
+4.  Open questions
+
+   o Everything in section 2.
+
+   o Whether the observed order matches the sync order exactly. The
+     report was written from memory of a single viewing, so a scene
+     may be out of place; the sync numbers in effects/timeline.txt are
+     the authority where the two disagree.
+
+   o FUN_341c is Ground_Render at sync 0x0a - effects/ground.txt.
+
+     THE CLOSE-UP ROTATING GROUND IS SYNC 0x35 [verified].
+     The texture question is settled by img 0x4f2c, which COPIES THE
+     TERRAIN SHADE MAP from 0x4a79 - just built by Terrain_BuildShade
+     at img 0x4f15 - into 0x2a79, the segment Roto_Render takes as its
+     texture, and clears the other two buffers. Its runner is
+     Roto_RunWithMesh, so Mesh_Draw puts the craft over it, and mode
+     0x15 decrements g_RotoZoom every other tick from the 0x200 set at
+     img 0x4eda - zooming in.
+
+     A rotozoom of the terrain's own shading, with the craft above it,
+     moving closer. Every scene in this document now has a mechanism.

@@ -1,0 +1,327 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                      LITHIUM: THE TUNNEL
+
+
+Abstract
+
+   Scene 2.11's second half, straight after the glass shatters.
+
+   THE ROCK IS NOT IN THIS SCENE, but it IS in a tunnel. Phase four
+   of maybe_Scene_BumpShatter draws the tunnel, the flying glass and
+   the rock together - effects/rock.txt - and this runner follows it
+   with the tunnel alone.
+
+   THE TUNNEL HAS NO MESH. It is rebuilt from the sine table every
+   frame: a circle of points swept along a path, and the path is
+   three angles advancing at fixed rates. Nothing about it is stored
+   in the asset segment.
+
+   THE CURVE IS 4:2:1. The three heading angles step by 0x100, 0x80
+   and 0x40 a ring, so the path traces a Lissajous figure - smooth,
+   non-repeating within a scene, and free of any spline or control
+   points.
+
+   All [verified] from the three routines.
+
+Table of Contents
+
+   1. The routines
+   2. Tunnel_StepPath, the curve
+   3. Tunnel_Build, the rings
+      3.1. Sixteen vertices, two triangles a quad
+   4. maybe_Scene_Tunnel
+   5. Tick_Tunnel, and why it never ends
+   6. How the eye stays on the window
+      6.1. Why they match
+      6.2. The three sign choices
+      6.3. Measured
+   7. Where the camera looks
+      7.1. There is no distance term
+      7.2. The winding
+   8. Open questions
+
+1.  The routines
+
+       Tunnel_Build        1000:0496   the vertices, once a frame
+       Tunnel_StepPath     1000:0602   one ring along the path
+       maybe_Scene_Tunnel  1000:040b   the runner
+
+2.  Tunnel_StepPath, the curve
+
+       eax, ebx, ecx = (0, 0, 0x100)         a step straight ahead
+       Vec_RotZ, SAR 8
+       Vec_RotX, SAR 0xc
+       Vec_RotY, SAR 0x10
+       g_TunnelPath{X,Y,Z} += the rotated step
+       g_RotAngleX += 0x100
+       g_RotAngleY += 0x80
+       g_RotAngleZ += 0x40
+
+   A FIXED STEP ROTATED BY A TURNING FRAME. The heading is not
+   stored as a direction; it is three Euler angles that advance by
+   constant amounts every ring, so the path curves continuously.
+
+   THE RATES ARE 4:2:1, which is what makes the shape read as a
+   tunnel winding rather than a circle: the three axes come back into
+   phase only after a long run.
+
+   The same three angles are what Tunnel_Build rotates each ring by,
+   so the rings stay perpendicular to the path without any extra
+   work.
+
+3.  Tunnel_Build, the rings
+
+       DS = 0x2ad2;  si = cs:[0x88af] << 4        the vertex cursor
+       g_TunnelPath{X,Y,Z} = the camera position, SAR 0xc then << 8,
+           with z negated
+       g_RotAngle{X,Y,Z} = 0
+       g_TunnelFirstRing times:  Tunnel_StepPath
+       then per ring, per vertex:
+           eax = g_SinTable[bx + 0x800]            COSINE
+           ebx = g_SinTable[bx]                    sine
+           ecx = 0
+           Vec_RotZ, SAR 0xa
+           Vec_RotX, SAR 0xc
+           Vec_RotY, SAR 0x11
+           add g_TunnelPath{X,Y,Z}
+           store at [si], [si+2], [si+4]
+
+   A RING IS A CIRCLE. The cosine and the sine are one table read
+   0x800 apart - subsystems/mesh3d.txt section 4 - so a vertex is
+   (cos t, sin t, 0) carried into the path's frame.
+
+   THE FIRST RINGS ARE WALKED AND DISCARDED. g_TunnelFirstRing steps
+   the path forward before any vertex is written, which is how the
+   geometry behind the camera is skipped without a clip test.
+   maybe_Scene_BumpShatter sets that pair to -4 and 11.
+
+   THE THREE SHIFTS DIFFER - 0xa, 0xc and 0x11 - so the ring is not
+   simply rotated into place but scaled unequally on each axis, and
+   the bore is an ellipse that changes shape along the run.
+
+   3.1.  Sixteen vertices, two triangles a quad
+
+      The vertex loop runs bx from 0 to 0x2000 in steps of 0x200, so a
+      ring is SIXTEEN VERTICES - 0x2000 bytes is the whole 2048-entry
+      sine table and 0x200 is a sixteenth of it.
+
+      The texture coordinates are taken at img 0x055f:
+
+          u = (g_RotAngleX >> 3) & 0xff
+          v = (bx >> 3) & 0xff
+
+      g_RotAngleX advances 0x100 a ring, so u advances 0x20 and the map
+      repeats every eight rings along the bore; v advances 0x40 a vertex,
+      so it repeats FOUR TIMES around the circumference.
+
+      The faces follow at img 0x05a0, two triangles per quad and sixteen
+      quads per ring:
+
+          v0 = cx + a
+          v1 = cx + ((a + 1) & 0xf)
+          v2 = v1 + 0x10
+          triangle 1 = v0, v1, v2
+          triangle 2 = v2, cx + a + 0x10, cx + a
+
+      THE & 0xf IS WHAT CLOSES THE BORE, wrapping the sixteenth quad onto
+      the first with no seam vertex. img 0x05d0 subtracts 0x11 and masks
+      with 0xf, and the mask also discards the ring base in CX because
+      that is always a multiple of 0x10.
+
+      Fifteen rings give 240 vertices and 448 triangles [verified by
+      transcription].
+
+4.  maybe_Scene_Tunnel
+
+   1000:040b, from the main script at 1000:02a3 - directly after
+   maybe_Scene_BumpShatter, which is the glass.
+
+       cs:[0x8f80] = 0x36b;  g_TickHandler = 0x6b7f
+       loop:
+           Obj_LoadOrientA;  cs:[0x88af] = 0
+           cs:[0x8fa6] = 0x6ad2
+           Tunnel_Build
+           the camera angles, SAR 4
+           Scene_ProjectVerts;  Scene_DrawFacesReset
+           Screen_BlitFull(0x4ad2);  Demo_PollKeys
+       until the music position reaches 0x1e, then 0x1f
+
+   THE POSITION IS SPLIT COARSE AND FINE. Tunnel_Build seeds the
+   path from (pos >> 0xc) << 8 at img 0x04a3, while the runner sets
+   g_CamPosX and g_CamPosZ from (-(pos + 1) & 0xfff) >> 4 at img
+   0x0435 and 0x0449. The two sum to pos/16, so the geometry re-seeds
+   every 0x1000 while the camera offset wraps - which is how the
+   flight stays in small numbers however far it goes.
+
+   IT IS DRAWN WITH THE SPHERE MAP. cs:[0x8fa6] is 0x6ad2, the same
+   chrome environment map the rock and the running figure use -
+   subsystems/texture.txt.
+
+   IT BLITS THE WHOLE SCREEN rather than a dirty rectangle, because
+   the tunnel covers all of it every frame - subsystems/raster.txt
+   section 6.
+
+5.  Tick_Tunnel, and why it never ends
+
+   1000:6b7f, installed by the runner at 1000:0415.
+
+   NOTHING IS APPENDED AND NOTHING IS FREED. The whole bore is
+   regenerated from ring 0 every frame, so "endless" is a WINDOW
+   SLIDING over a curve, not a mesh being extended.
+
+   Every sixteenth tick:
+
+       g_TunnelFirstRing++
+       g_TunnelLastRing++
+
+   Tunnel_Build pre-steps the path g_TunnelFirstRing times and throws
+   those rings away - img 0x04e3 - then emits last minus first. So
+   the count stays at 15 while the window walks forward: A RING
+   APPEARS AT THE FAR END AND ONE DROPS OFF THE NEAR END. Being a
+   thousand rings along costs only the pre-step loop and not one byte
+   of storage.
+
+   In the same sixteenth tick it recomputes the camera's velocity:
+
+       g_RotAngle2{X,Y,Z} = g_SlotPitch, g_SlotYaw, g_SlotRoll
+       eax, ebx, ecx = (0, 0, 0x100)
+       Vec_RotZ2, SAR 8;  Vec_RotX2, SAR 0xc;  Vec_RotY2, SAR 0x10
+       negate eax and ebx
+       cs:[0x9013], [0x9017], [0x901b] = the result
+       g_SlotPitch += 0x100;  g_SlotYaw += 0x80
+
+   THAT IS Tunnel_StepPath'S ARITHMETIC EXACTLY - the same step, the
+   same three rotations, the same shifts, the same 0x100 and 0x80
+   increments - on the second angle set instead of the first. The
+   camera walks the identical curve the tunnel is built along, one
+   ring per 16 ticks, in lockstep with the window.
+
+   IT DOES NOT ADVANCE THE ROLL. Tunnel_StepPath adds 0x40 to its
+   third angle every ring; nothing here adds to g_SlotRoll, so the
+   camera does not twist with the rings.
+
+   Between those, every tick:
+
+       g_SlotFlight{X,Y,Z} += the velocity
+       g_SlotHome* += (g_SlotFlight* - g_SlotHome*) >> 5
+       Pal_Animate;  Pal_Upload
+
+   which is the smooth motion within one ring, and the colour cycling.
+
+   g_RecordMode is the 16-tick counter here and the record/replay flag
+   in Flight_Step - one byte, two jobs.
+
+6.  How the eye stays on the window
+
+   Two terms advance as the scene runs and they CANCEL.
+
+   The pre-step pushes the window forward by ring(first), and the
+   position term pulls it back by the same amount, so the window sits
+   a bounded distance ahead of the eye for ever.
+
+   6.1.  Why they match
+
+      The camera's velocity IS the path's step - Tick_Tunnel rebuilds
+      it from the same (0,0,0x100), the same three rotations and the
+      same shifts, section 5. So:
+
+          the camera integrates that step EVERY TICK
+          the window advances one ring every SIXTEEN ticks
+          the coarse/fine split divides the position by SIXTEEN
+
+      Sixteen ticks of camera motion, divided by sixteen, is exactly
+      one ring step. THE `& 0xf` AND THE `>> 4` ARE THE SAME NUMBER,
+      and that is the whole lock. Change either and the tunnel slides
+      away from the viewer at the difference.
+
+   6.2.  The three sign choices
+
+      Each axis cancels by a different route, and every one of them
+      looks arbitrary until this is the reason:
+
+      +------+--------------------------------+---------------------+
+      | Axis | What is negated                | Where               |
+      +======+================================+=====================+
+      | z    | the PATH START, -((p>>0xc)<<8) | img 0x04bc, neg cx  |
+      | x, y | the VELOCITY, neg eax / ebx    | img 0x6c67          |
+      +------+--------------------------------+---------------------+
+
+      On z the path start carries the minus, so coarse plus fine
+      comes to 255 - pos/16 and cancels the pre-step directly. On x
+      and y the velocity carries it instead, so the position
+      accumulates the opposite of the path's own drift and pos/16
+      cancels ring(first) the other way about.
+
+   6.3.  Measured
+
+      Transcribing both and running them together, the window's first
+      ring in VIEW space over 12,000 ticks and 745 rings:
+
+          x   -519 ..  517
+          y   -520 ..  519
+          z   -294 ..  775
+
+      BOUNDED, NOT DRIFTING. The residual is the home position easing
+      after the flight position by a 32nd plus the truncation in the
+      split; it does not accumulate. sim/lithium/parts.py.
+
+7.  Where the camera looks
+
+   THE ORIENTATION IS THE THREE DECREMENTS IN Tick_Tunnel, and they
+   reach the renderer by a route that hides them: they go to the
+   EASED angle arrays, not the live ones.
+
+       cs:[0x8af9] -= 0x10      ->  -0x100 a ring
+       cs:[0x8b27] -= 0x08      ->  -0x80  a ring
+       cs:[0x8b55] -= 0x0c      ->  -0xc0  a ring
+
+   Obj_LoadOrientA, called at the top of the scene's loop at img
+   0x041e, copies those three into g_SlotAngleX, Y and Z at 0x8a6f,
+   0x8a9d and 0x8acb - and THOSE are what Scene_ProjectVerts rotates
+   the world by, at img 0x2e96, 0x2eaf and 0x2ec8.
+
+   X AND Y ARE THE EXACT NEGATION of Tunnel_StepPath's +0x100 and
+   +0x80 a ring, so the camera turns into the bend precisely as fast
+   as the bore turns away from it. Without them the eye keeps
+   pointing down +z, and the first bend puts the wall in front of it.
+
+   Z IS NOT. The path advances its third angle by 0x40 a ring and
+   this takes 0xc0, so THE VIEW ROLLS 0x80 A RING relative to the
+   tube. A perfect inverse would be 0x4 a tick; the demo uses 0xc.
+
+   7.1.  There is no distance term
+
+      The camera is exactly g_CamPosX, g_SlotPosY, g_CamPosZ, with
+      nothing added. Scene_ProjectVerts ADDS the position BEFORE it
+      rotates - img 0x2e84, then 0x2e96 - so an offset along the view
+      axis is not available to a scene even if one were wanted: it
+      would turn with the view instead of pushing the eye back.
+
+   7.2.  The winding
+
+      The bore is seen from INSIDE, and the authored winding is the
+      one that survives: of 448 faces, 334 pass the backface test as
+      authored against 99 reversed. The 84 rejected are the far wall
+      seen through the near one.
+
+8.  Open questions
+
+   o The scene's length is a MUSIC cue - 1000:048d returns when the
+     order reaches 0x1f - so how long it runs depends entirely on
+     where the module has got to, and that makes it a measure of the
+     music clock rather than of anything here.
+
+     g_TunnelFirstRing IS A TICK COUNTER FOR THAT. It starts at -4
+     when the bump scene hands over, advances one per sixteen ticks
+     and is never reset, so it spans the shatter and the tunnel
+     together. Measured against the original: at the point the fade
+     out has run 59 ticks it reads 35, which is 624 ticks since the
+     handover. The shatter phase is 293 of those [verified], so the
+     TUNNEL ITSELF RUNS 331 TICKS.
+
+   o Why cs:[0x8f80] is 0x36b here. Scene_DrawFaces rejects a face
+     whose summed depth is at or below it - img 0x32aa - and most
+     scenes set a different value, but what the number is derived
+     from is not known.

@@ -1,0 +1,66 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                      UKKO: THE MUSIC MODULE
+
+
+Abstract
+
+   A Scream Tracker 3 module embedded in the depacked image. All
+   [verified] by tools/extract_s3m.py, which derives the end from
+   the parapointers rather than trusting any stored length.
+
+Table of Contents
+
+   1. Where it is
+   2. What it contains
+   3. Extracting it
+
+1.  Where it is
+
+   The SCRM magic sits at depacked image offset 0x703ac, which puts
+   the S3M header at 0x70380. It runs to 0x75cf6 - 22,902 bytes,
+   about 5 per cent of the image.
+
+   Demo_Main stages it before the first frame: a 0x7d00-byte copy
+   from 8038:0000 - linear 0x80380, the same offset - to the segment
+   in g_ModuleSeg, then Music_Driver is called with AX = 7 and that
+   segment in DX. ../subsystems/startup.txt section 5.
+
+2.  What it contains
+
+       8 orders, 17 instruments, 6 patterns
+       saved by Scream Tracker 3.00
+       13 named samples, 12 instruments carry playable PCM
+
+   The first instrument's filename is "Longjamp.995" and its name is
+   "Longjam productions:", which is the only attribution anywhere in
+   the image - the program's own code carries no credit string.
+
+   THE SAMPLES ARE TINY, 56 to 1200 bytes each and about 10 KB in
+   total. The rest of the sample slots are named in the form
+   xNNNNNNx.000.
+
+3.  Extracting it
+
+       py -3.10 tools/extract_s3m.py reverse/unpacked/ukko.bin
+           -o reverse/unpacked/ukko.s3m
+
+   The extractor is shared and finds the magic itself; nothing in it
+   knows which demo it is reading.
+
+   THE C PORT NEVER EXTRACTS IT. src/ukko/ukko_music.c hands ibxm/ac
+   the 22,902 bytes where they already sit in the depacked image and
+   lets it play from there, so the port reads one packed original and
+   writes nothing. The extractor above stays because a .s3m file is
+   useful to listen to and to open in a tracker.
+
+   THE REPLAYER IS NOT RECONSTRUCTED AND IS NOT MEANT TO BE. The
+   demo's own driver is a linked-in third-party blob - ../subsystems/
+   music.txt - so what the port reproduces is WHICH bytes play and
+   WHEN, not how a Scream Tracker module is mixed. ibxm/ac is BSD
+   3-clause, builds as strict C89, and is vendored under
+   src/third_party/ibxm with its provenance.
+
+   THE BYTES ARE NOT COMMITTED. They are derived from a binary we do
+   not redistribute, on the same footing as the depacked image.

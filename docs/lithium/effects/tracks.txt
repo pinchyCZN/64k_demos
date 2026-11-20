@@ -1,0 +1,204 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                   LITHIUM: THE RECORDED MOTION TRACKS
+
+
+Abstract
+
+   The demo's animation is RECORDED MOUSE INPUT, and the tool that
+   recorded it ships inside the binary.
+
+   Track_Play at 1000:5efe replays a three-byte-per-entry track into
+   one slot of the parameter bank. Track_Record at 1000:5f56 captures
+   the same format from INT 33h and the keyboard. Both read and write
+   the asset segment, so the recording was done in the demo itself and
+   whatever was in the buffer when the author stopped is what shipped.
+
+   All [verified] from the two routines unless marked.
+   subsystems/objects.txt is the bank they drive.
+
+Table of Contents
+
+   1. The track format
+   2. Track_Play
+   3. Track_Record, and the author's keyboard
+   4. Who plays what
+   5. The key index is a command set
+   6. Why this matters for the reconstruction
+   7. Open questions
+
+1.  The track format
+
+   Three bytes per entry, consumed one entry every six frames:
+
+       +0x00   signed byte   a horizontal delta
+       +0x01   signed byte   a vertical delta
+       +0x02   byte          packed: bits 0-5 a COMMAND, section 5,
+                             bits 6-7 the throttle - flight.txt 3
+
+   The deltas are scaled by 32 and ACCUMULATED, not assigned, so a
+   track stores RATES OF TURN rather than absolute angles. That is
+   what makes it mouse data: a mouse reports movement, never position.
+   Flight_Step is what turns those rates into motion - flight.txt.
+
+   A track lives in the asset segment 0x1e5f, and g_SlotTrack holds
+   one offset per slot. 1000:18a3 hands out 0x7aca, 0x74fd and 0x809a,
+   and 0x74fd is EXACTLY where the last model ends - img 0x15aed,
+   ../formats/mesh.txt section 4. So the tracks were appended to the
+   asset blob after the geometry.
+
+   TWO OF THOSE THREE POINTERS LAND ON ZEROS. That is not a parse
+   error: those slots have no recording. Only 0x7aca has data at its
+   start.
+
+2.  Track_Play
+
+       g_SlotTrackTick[slot]++
+       if it is still <= 5: return
+       g_SlotTrackTick[slot] = 0
+       di = g_SlotTrack[slot]
+       g_SlotPitchAcc[slot] -= (signed) gs:[di+1] << 5
+       g_SlotYawAcc[slot]   += (signed) gs:[di+0] << 5
+       maybe_g_SlotKeyIdx[slot]  = gs:[di+2] & 0x3f
+       g_SlotThrottle[slot] = gs:[di+2] >> 6
+       g_SlotTrack[slot] += 3
+
+   SIX FRAMES PER ENTRY is the number to keep. At a nominal 70 Hz that
+   is about 12 entries a second, so a ten-second shot is 360 bytes -
+   which is why appending the tracks to a 63 KB file was affordable.
+
+   g_SlotPitchAcc and g_SlotYawAcc are two of the eleven word arrays
+   in the bank, and Obj_Reset zeroes both, so a scene starts every
+   slot's accumulated orientation at zero and the track steers it from
+   there.
+
+   NOTE THE SIGN ASYMMETRY: pitch is SUBTRACTED and yaw is ADDED. That
+   is a screen-space convention, not a bug.
+
+3.  Track_Record, and the author's keyboard
+
+       g_SlotTrackTick[slot]++, return unless it passed 5
+       al = IN from port 0x60                  the raw scancode
+       scan g_RecScancodes for al, index into dl
+       maybe_g_SlotKeyIdx[slot] = dl
+       di = g_SlotTrack[slot]
+       INT 33h AX=000Bh                        mouse motion counters
+       cx = (cx + 4) >> 3                      horizontal
+       dx = (dx + 4) >> 3                      vertical
+       gs:[di] = cl;  gs:[di+1] = dl
+
+   The +4 before the >>3 is rounding to nearest rather than
+   truncating, which matters for a signed delta that is usually small.
+
+   g_RecScancodes at 1000:904a is twenty-four raw AT scancodes:
+
+       01 Esc      34 .        35 /        1e A
+       2c Z        2d X        2e C        2f V
+       1c Enter    36 RShift   02 1        03 2
+       04 3        05 4        06 5        07 6
+       08 7        09 8        0a 9        0b 0
+       0c -        0d =        0e Backspace    39 Space
+
+   Twenty-four entries fit the six bits a track entry allows. This is
+   THE AUTHOR'S OWN FLYING AND CUEING KEYBOARD, left in the shipped
+   binary - the number row for picking something, Z X C V and A under
+   the left hand, Enter and Space for events.
+
+   RECORD AND PLAY ARE TWO STATES OF ONE MACHINE, not two builds.
+   Track_Record has a single call site at 1000:65e7, inside the
+   per-tick dispatch region, and the block around it sets g_RecordMode
+   to 1 while the playback block at 1000:6612 clears it.
+
+4.  Who plays what
+
+   Track_Play has FOURTEEN call sites, in three consecutive runs
+   [verified]:
+
+   +-------------+--------+----------------------------------------+
+   | 1000:63cb   | 3      | three slots driven from tracks         |
+   | 1000:661a   | 8      | EIGHT slots - the largest cast         |
+   | 1000:679b   | 3      | three slots                            |
+   +-------------+--------+----------------------------------------+
+
+   Eight simultaneous tracks is the battle - scenes.txt 2.12 counts
+   three enemy craft and two gold starships, plus the tower and the
+   camera [inferred from the count alone].
+
+5.  The key index is a command set
+
+   The six-bit half of byte 2 is g_SlotCommand, and Flight_Step
+   dispatches on it at 1000:5bac with a chain of compares - there is
+   no table:
+
+   +-------------+------------------------------------------------+
+   | Command     | Effect on the slot                             |
+   +=============+================================================+
+   | 0x02 / 0x03 | roll +/- 4, then translate along               |
+   |             | (g_SlotSpeed, 0, 0) rotated by pitch and yaw,  |
+   |             | SAR 7 - A BANKED STRAFE                        |
+   | 0x01        | g_SceneDone = 1 - END THE SCENE                |
+   | 0x04 / 0x05 | g_SlotFlightY +/- g_SlotSpeed << 4             |
+   | 0x06 / 0x07 | g_SlotRollRest -/+ 0x20                        |
+   | 0x08        | ease g_SlotRollRest toward the nearest 0x2000  |
+   |             | by a 16th, snapping when the step reaches zero |
+   | 0x0a - 0x17 | g_SlotSpeed = (cmd - 9) * 2 - 1, 14 speeds     |
+   | 0x18        | rotate (0,0,-0xa0) by the slot's angles, add   |
+   |             | a fixed base, and WRITE the slot's position    |
+   | 0x19        | g_SlotFiring = 1 - FIRE                        |
+   | 0x1a        | copy this slot into slot 0x10 and set          |
+   |             | g_TowerFalling - THE TOWER IS HIT              |
+   +-------------+------------------------------------------------+
+
+   SO THE DEMO HAS NO EVENT LIST IN CODE. The author flew each craft
+   with the mouse and pressed keys as he went; the keystrokes went
+   into the track beside the mouse deltas, and replaying the track
+   replays the whole performance - when a ship fires, when it changes
+   speed, when a scene ends, when the tower starts to fall.
+
+   THAT IS WHY COMMAND 0x1A NAMES NO TARGET. It copies whichever slot
+   executed it into the tower's slot, so the tower falls from where
+   the shot came rather than from a position written down anywhere -
+   effects/towerfall.txt section 3.
+
+   0x02 AND 0x03 ARE THE ONLY SIDEWAYS MOTION. Their vector is
+   (speed, 0, 0) - the craft's own X axis - where the throttle
+   section of the same routine uses (0, 0, speed), straight ahead. A
+   track made of one of them repeated is a craft flying a circle, and
+   two of the battle's eight are exactly that - effects/battle.txt
+   section 3.
+
+   Command 0x08's snap is worth a note: it eases toward
+   (roll + 0x1000) & 0xe000, which is the nearest eighth of a
+   revolution, and assigns the target outright once the eased step
+   rounds to zero. So "level out" converges exactly rather than
+   creeping forever.
+
+6.  Why this matters for the reconstruction
+
+   IT MEANS THE ANIMATION CANNOT BE DERIVED, ONLY READ. There is no
+   flight model to transcribe for these slots and no curve to fit - the
+   motion is a byte stream someone recorded with a mouse in 1997.
+   sim/lithium/ can replay it exactly, because the bytes are in the
+   image, but nothing about it can be regenerated or tidied.
+
+   It also sets the shape of the work left: for each of the three runs
+   in section 4, find which slot gets which g_SlotTrack offset, and the
+   scene's choreography falls out of the data rather than out of the
+   code.
+
+   XCURSION does the same thing - ../../xcursion/effects/flight.txt
+   records that its mode 0x16 replays a recorded flight track - so
+   this is a house technique across both demos rather than a one-off.
+
+7.  Open questions
+
+   o WHERE EACH TRACK ENDS. Nothing in Track_Play bounds the pointer,
+     so either a track runs until the scene ends on music position, or
+     a terminator exists that has not been found.
+
+   o How the eased angles reach g_SlotAngle*. Flight_Step's tail
+     eases cs:[si+0x8af9] toward g_SlotPitch and cs:[si+0x8b27]
+     toward g_SlotYaw, each by a quarter - 1000:5d9b - but what reads
+     those two arrays has not been found. They are two more slots of
+     the same 0x2e-stride bank as g_SlotAngle*.

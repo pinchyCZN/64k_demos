@@ -1,0 +1,228 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                      EXCURSION: THE TIMELINE
+
+
+Abstract
+
+   The complete part list, from Demo_Entry's first palette to
+   Demo_Shutdown, read off the two functions that hold it.
+
+   A part is a block of cs: parameters, a g_AnimMode that selects the
+   per-tick animation handler, a g_MusicPosTarget that says when the
+   part ends, and one runner. Thirty-odd of them.
+
+   This is also what finally ties the four 3D models to the passages
+   they appear in - section 3 - and the answers agree with what the
+   demo visibly does.
+
+Table of Contents
+
+   1. How to read it
+   2. The parts
+   3. Which model is which
+   4. What each runner draws
+   5. Open questions
+
+1.  How to read it
+
+   Three things mark a part [verified]:
+
+       MODE n    g_AnimMode, cs:0xa881 - picks the per-tick handler out
+                 of g_AnimDispatch; see subsystems/animation.txt
+       sync n    g_MusicPosTarget, cs:0x9969 - the part ends when the
+                 module reaches order position n
+       runner    the function that loops frames until then
+
+   Demo_Entry runs modes 1 to 0x13 and sync 4 to 0x32, then TAIL JUMPS
+   to Demo_Timeline at img 0x0a37, which runs modes 8 and 0x14 to 0x1c
+   and sync 0x33 to 0x52 before jumping to Demo_Shutdown. Nothing
+   returns.
+
+   The sync numbers are MODULE ORDER POSITIONS, not seconds, so the
+   whole structure is paced by the S3M - see subsystems/music.txt.
+
+2.  The parts
+
+   Demo_Entry [verified]:
+
+   +------+-------+-----------------------------------------------------+
+   | sync | mode  | What the script does                                |
+   +======+=======+=====================================================+
+   | 0x04 |  -    | Pal_BuildMain, Plasma_Generate, Terrain_HeightAt,   |
+   |      |       | Mesh_FaceNormals, then FireText_Render              |
+   | 0x07 |  1, 2 | Countdown_Render, then FireText_Render again        |
+   | 0x0a |  3    | Plasma_Generate, Planet_BuildMap                    |
+   | 0x0c |  4    | Points_Randomize, PLANET_RENDER - the planet, the   |
+   |      |       | one part where the ball is on screen in colour      |
+   | 0x0d |  5    | Pal_BuildMain, Planet_RENDER with the ball          |
+   |      |       | suppressed - stars and the craft                    |
+   | 0x12 |  6    | Plasma_Generate                                     |
+   | 0x14 |  7, 8 | MESH 0x572f AND 0x585f, Mesh_FaceNormals            |
+   | 0x15 |  8    | MESH 0x572f again, Planet_Render, ball off          |
+   | 0x16 |  8    | Planet_Render, ball off                             |
+   | 0x19 |  9    | Shots_ClearGlowField, BATTLE_RUN                    |
+   | 0x1b |  0xa  | Shots_ClearGlowField, BATTLE_RUN                    |
+   | 0x21 |  0xb  | BATTLE_RUN, craft A in front, glow box moved        |
+   | 0x23 |  0xc  | MESH 0x585f, Battle_RunNoShots                      |
+   | 0x25 |  0xd  |                                                     |
+   | 0x26 |  0xe  | Plasma_Generate                                     |
+   | 0x29 |  0xf  | BEAMS_RUN twice - g_RotoAngleRate +0x20 at img      |
+   |      |       | 0x0855 then -0x20 at 0x0881, so the sweep reverses  |
+   | 0x2a | 0x10  | Pal_BuildMain, maybe_Pal_Build6, TUNNEL_BUILDANGLE, |
+   |      |       | then TUNNEL_RUN - the tunnel with the ship in it    |
+   | 0x2b | 0x11  |                                                     |
+   | 0x2d | 0x12  | Pal_SetRgbRamps - the cold blue-cyan-white ramp     |
+   | 0x32 | 0x13  | Plasma_Generate, Pal_BuildMain                      |
+   +------+-------+-----------------------------------------------------+
+
+   Demo_Timeline [verified]:
+
+   +------+-------+-----------------------------------------------------+
+   | sync | mode  | What the script does                                |
+   +======+=======+=====================================================+
+   | 0x33 |  8    | Pal_BuildMain, Points_Randomize,                    |
+   |      |       | Planet_Render, ball off                             |
+   | 0x34 | 0x14  | Plasma_Generate, Planet_BuildMap,                   |
+   |      |       | Pal_BuildGreyLow, PLANET_RENDER - THE GREY MOON     |
+   | 0x35 | 0x15  | Plasma_Generate                                     |
+   | 0x37 | 0x16  | the two-sine field, then VOXEL_RENDER               |
+   | 0x37 | 0x17  | Plasma_Generate, maybe_Warp_Render,                 |
+   |      |       | +g_TickTarget 0x20                                  |
+   | 0x3a | 0x18  | MESH 0x94f4, Mesh_FaceNormals,                      |
+   |      |       | Terrain_HeightAt TWICE, then CAR_RUN - which draws  |
+   |      |       | the craft, THE FLAG and the car. Mode 0x18's        |
+   |      |       | handler is the vehicle model: effects/car.txt       |
+   | 0x4a | 0x19  | SCROLLER_RUN - the credits                          |
+   | 0x4b | 0x1a  | MESH 0x5c47, Mesh_FaceNormals                       |
+   | 0x4c | 0x1b  | Plasma_Generate                                     |
+   | 0x52 | 0x1c  | then Demo_Shutdown                                  |
+   +------+-------+-----------------------------------------------------+
+
+3.  Which model is which
+
+   SIX MODELS EXIST, not four - effects/battle.txt section 5 lists
+   them all, including the two weapons and the flag that this reading
+   missed. Of the four large ones, five g_MeshFaces stores place them
+   because 0x572f is set twice [verified].
+   Placing each in its part answers what the models are, and the
+   answers match what the demo shows [observed] without having been
+   derived from it:
+
+   +----------+-------------------+--------------------------------------+
+   | Model    | Set at sync       | What it must be                      |
+   +==========+===================+======================================+
+   | 0x572f   | 0x14 and 0x15     | on screen WITH 0x585f at sync 0x14,  |
+   |          |                   | so the two craft of the battle       |
+   +----------+-------------------+--------------------------------------+
+   | 0x585f   | 0x14 and 0x23     | TWO SEPARATE PASSAGES, which is the  |
+   |          |                   | craft seen in several scenes         |
+   +----------+-------------------+--------------------------------------+
+   | 0x94f4   | 0x3a              | set right after Voxel_Render and the |
+   |          |                   | warp, and the only model whose part  |
+   |          |                   | calls Terrain_HeightAt - TWICE. An   |
+   |          |                   | object that follows the ground: THE  |
+   |          |                   | CAR                                  |
+   +----------+-------------------+--------------------------------------+
+   | 0x5c47   | 0x4b              | immediately after Scroller_Run, with |
+   |          |                   | Plasma_Generate in the next part:    |
+   |          |                   | THE "THE END" LETTERS over a plasma  |
+   +----------+-------------------+--------------------------------------+
+
+   The two strongest pieces of evidence are structural, not visual.
+   0x94f4's part is the ONLY one that calls Terrain_HeightAt, which is
+   the routine that asks how high the ground is at a world position -
+   exactly what something driving over the landscape needs and what an
+   aircraft does not. And 0x5c47 is set in the part immediately
+   following the credits scroll, which is where an end card goes.
+
+   0x585f being set in two parts, sync 0x14 and sync 0x23, is what
+   makes it the craft that recurs; 0x572f is set only inside the
+   0x14-0x16 passage.
+
+4.  What each runner draws
+
+   The runners, and what is established about them:
+
+   +------------------------+--------------------------------------------+
+   | FireText_Render        | DRAWS THE LANDSCAPE TOO. Its frame calls   |
+   | 1000:2370              | Voxel_Render, then Mesh_SetupTransform,    |
+   |                        | then Mesh_Draw when ecx < 0x28000, and     |
+   |                        | only then the flame-filled text mask. So   |
+   |                        | the opening is landscape + object + text   |
+   |                        | in one runner.                             |
+   +------------------------+--------------------------------------------+
+   | Countdown_Render       | the 4-3-2-1 fire particles                 |
+   | 1000:3873              | effects/countdown.txt                      |
+   +------------------------+--------------------------------------------+
+   | Voxel_Render           | the landscape; effects/voxel.txt           |
+   | 1000:3620              |                                            |
+   +------------------------+--------------------------------------------+
+   | Flag_Render            | THE WAVING VISTA FLAG - the banner text    |
+   | 1000:2504              | displaced by the sine field, in 2x2 blocks |
+   |                        | straight to 0xA000. effects/flag.txt       |
+   +------------------------+--------------------------------------------+
+   | Scroller_Run           | the credits; effects/scroller.txt          |
+   | 1000:3007              | motion: effects/scroller.txt section 5     |
+   +------------------------+--------------------------------------------+
+   | Beams_Render           | ROTATING STRIPES by feedback, straight to  |
+   | 1000:317a              | 0xA000 - NOT a rotozoom, however much its  |
+   |                        | first four instructions look like one.     |
+   |                        | effects/beams.txt                          |
+   +------------------------+--------------------------------------------+
+   | Planet_Render          | SIX PARTS USE IT - sync 0x0c, 0x0d, 0x15,  |
+   | 1000:2925              | 0x16, 0x33, 0x34. A starfield, a mapped    |
+   |                        | sphere, then a 3D object. THE BALL IS      |
+   |                        | SUPPRESSED IN FOUR OF THE SIX, so it also  |
+   |                        | serves as the plain space scene: the       |
+   |                        | planet at 0x0c, the grey moon at 0x34, and |
+   |                        | stars plus a craft in the rest.            |
+   |                        | effects/planet.txt                         |
+   +------------------------+--------------------------------------------+
+
+   The runners are all small wrappers of the same shape - call a
+   renderer, present, loop while g_MusicPos is below the target - so
+   naming them was mostly naming what they call:
+
+       Battle_Run        264b   sync 0x19, 0x1b, 0x21
+       Battle_RunNoShots 2efa   sync 0x23, 0x25
+       Roto_Run          25b5   sync 0x0d, 0x0e, 0x26
+       Roto_RunWithMesh  25f7   sync 0x35
+       Warp_RunFull      2639   sync 0x12
+       Landscape_Run     23da   sync 0x37
+       Car_Run           23fe   sync 0x3a
+       TheEnd_Run        25c7   sync 0x4b
+
+   Flag_Render at 1000:2504 is the exception: img 0x25a7 makes it wait
+   for g_TickTarget as well, and its part sets 0x20. THAT IS 32 MUSIC
+   ROWS, not 32 timer ticks - see effects/flag.txt section 4 - so it
+   is a full scene, the waving VISTA flag.
+
+   All identified. 1000:2621 is Ground_Run (effects/ground.txt),
+   1000:29bf is Water_Run (effects/water.txt) and 1000:2aef is
+   Tunnel_Run (effects/tunnel.txt). 1000:25e2 is a bare
+   Mesh_Draw-and-present loop with no call site found.
+
+5.  Open questions
+
+   o **The modes 9, 0xa and 0xb animation handlers**, which hold the
+     two craft's flight paths and fill the shot table - see
+     effects/battle.txt section 7.
+
+   o **The modes with no identified runner** are now fewer: sync 0x19,
+     0x1b and 0x21 are Battle_Run, 0x28 and 0x29 are BEAMS_RUN -
+     effects/beams.txt - 0x2a/0x2b/0x32 are 1000:2aef and 0x2d is
+     1000:29bf. What 1000:2aef and 1000:29bf DRAW is still open.
+
+   o **Pal_SetRgbRamps at sync 0x2d** sets a cold black-blue-cyan-white
+     palette with no fire band, and bypasses g_PaletteBase so no fade
+     can touch it. A moon or a space passage; its runner is unread.
+
+
+   o **The modes with no identified runner**, listed at the end of
+     section 4. Each is a part of the demo nobody has looked at.
+
+   o **Which part FireText_Render's Mesh_Draw call shows an object in.**
+     It is conditional on ecx < 0x28000, so it depends on run-time
+     state rather than the script.

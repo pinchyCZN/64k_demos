@@ -1,0 +1,1078 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                      THE PLAYGROUND - OURS, NOT THEIRS
+
+
+Abstract
+
+   Interactive parts built on top of the reconstruction. NOTHING HERE
+   IS IN ANY DEMO. These parts let a recovered effect be driven rather
+   than watched, and they are kept apart from everything under
+   docs/<demo>/ for one reason: those documents describe a binary, and
+   a reader must never have to wonder which of the two a number came
+   from.
+
+   Every constant in this document is ours and was chosen by feel. No
+   address in it may be cited as evidence about any demo.
+
+Table of Contents
+
+   1. Where it lives, and the rule it follows
+   2. The two vehicles
+      2.1. The ship
+      2.2. The car
+   3. The knobs
+      3.1. What actually sets the top speed
+      3.2. Climbing, and being pushed back
+      3.3. Jumping
+   4. The drag camera
+      4.1. Which parts have it, and what each one can move
+      4.2. The battle and the chase, where the objects are the view
+      4.3. Pan, orbit, and which parts get which
+      4.4. What rotating the starfield would take
+      4.5. LITHIUM's, and why it needs no pop
+   5. LITHIUM: flying the demo's own craft
+      5.1. There is no flight model here
+      5.2. Reaching it
+      5.3. The controls, and what bounds the craft
+      5.4. The sub-parts
+      5.5. What it costs the demo
+   6. Open questions
+
+1.  Where it lives, and the rule it follows
+
+   +------------------------------+----------------------------------+
+   | src/xcursion/xcursion_play.c | the parts                        |
+   | src/xcursion/xcursion_play.h | what the harness calls           |
+   +------------------------------+----------------------------------+
+
+   IT IS A FORK, NOT A HOOK. The demo's own car is
+   xcursion/effects/car.txt and is untouched: this file carries its
+   own terrain, its own camera and
+   its own copy of the vehicle model, so no change made for a player
+   can reach the reconstruction and no reconstruction fix can silently
+   change the handling.
+
+   What that costs is one copy of the physics. What it buys is that
+   the verified code stays verified, which is the trade this project
+   makes everywhere else too.
+
+   The harness reaches it through five additive lines in
+   xcursion_demo.c - a scene index, a dispatch case, an entry, a key
+   route and a seek short-circuit. Nothing else in the demo's code is
+   aware of it.
+
+   THE CALLER LENDS THE FRAMEBUFFER AND THE PALETTE. Xcur_PlayEnter
+   takes the palette pair and Xcur_PlayFrame takes the framebuffer,
+   which is what keeps this file clear of the demo's statics and lets
+   the fork be real rather than nominal.
+
+   It is not on the music. seek_scene short-circuits to it rather than
+   replaying the module, because there is no music position that means
+   "the player is driving".
+
+   IT FOLLOWS THE DEMO. img 0x53c4 jumps to Demo_Shutdown once the
+   water part's music position reaches 0x52; this goes to the
+   playground instead, so the game arrives out of the final black
+   rather than having to be skipped to.
+
+   THAT HANDOVER NEEDED A REPLAYER FIX FIRST. g_MusicPos is a plain
+   INC at img 0x2205 - it does not wrap and it does not skip the end
+   marker - and 0x52 is this module's 82 orders exactly, so the
+   counter only ever reaches it by climbing off the end of the list.
+   A replayer that wraps the position modulo the order count, which
+   is the tidy thing to write, can never produce the value the demo
+   waits for, and the last part runs for ever on a black screen.
+   xcursion/subsystems/music.txt section 6.
+
+2.  The two vehicles
+
+   THEY ARE ONE INDEX APART: a body, a model and a step function
+   each, so switching is a single assignment and the one left behind
+   keeps its place and goes on being drawn. Step away from the car,
+   fly off, look back and it is still parked down there. They start
+   in different places - the car on the ground at the origin, the
+   ship a short way off and SHIP_RISE above the land.
+
+   Almost nothing is shared, which is why the split is an if at the
+   top rather than conditionals threaded through one function. Both
+   take gas, the brake, a drag and a top speed, and both advance
+   along their yaw; everything else differs.
+
+   +--------------------+----------+----------+
+   | force              | car      | ship     |
+   +====================+==========+==========+
+   | brake              | yes      | yes      |
+   | slope gravity      | yes      | no       |
+   | spring and jumps   | yes      | no       |
+   | tilt from terrain  | yes      | no       |
+   | climb from trim    | no       | yes      |
+   | ceiling, clearance | no       | yes      |
+   +--------------------+----------+----------+
+
+2.1.  The ship
+
+   THE PITCH IS THE CLIMB, AND IT IS TRIM RATHER THAN A STICK. Up
+   and down move it and nothing returns it, so holding altitude
+   means flying the nose back to level. The rate is the pitch's sine
+   times the speed, so a slow ship climbs slowly and a stopped one
+   not at all.
+
+   THE BRAKE IS THE CAR'S, PLAY_BRAKE, on the same key and with the
+   same stopping power - about ninety ticks from the top speed. It
+   only ever slows: the ship has no reverse to oppose, so it
+   subtracts where the car's pushes back against the travel.
+
+   THE TERRAIN AND THE CEILING ARE PLAIN CLAMPS and touch nothing
+   else. A ship flown into a hill rides up it at SHIP_CLEAR, still
+   nose down, and goes on descending the far side the moment the
+   ground drops away - the terrain is the floor rather than a
+   collision.
+
+   Measured with the controls held: pitch clamps at SHIP_PITCH_MAX,
+   the height pins at SHIP_CEILING under full nose-up, and nose-down
+   into rising ground holds the clearance at exactly SHIP_CLEAR
+   while the height tracks the land beneath it.
+
+   ITS MODEL'S NOSE POINTS THE OTHER WAY, the same way its yaw does.
+   Drawn straight off the body it tilts nose-down to climb, so the
+   pitch is passed into the draw already negated - which is why that
+   function takes it rather than reading it off the body.
+
+   ITS CAMERA IGNORES THE TERRAIN ENTIRELY and rides a fixed lift
+   above the ship, with no switch - a terrain-following camera loses
+   a ship at altitude completely. The 'a' switch still works for the
+   car.
+
+2.2.  The car
+
+   Physics on the tick, picture on the frame - the demo's own split,
+   xcursion/subsystems/animation.txt section 1.1, so the handling
+   does not change with the frame rate.
+
+   What is kept from xcursion/effects/car.txt is the SHAPE of the
+   model, and it is worth keeping: the depth the wheels are under the
+   ground becomes
+   upward velocity, so a ridge throws the car instead of stopping it,
+   and two probe pairs - one along the body, one across - give pitch
+   and roll from the land rather than from the steering.
+
+   What is replaced is everything a player has to hold: the demo
+   steers with a sine sweep and accelerates without a ceiling.
+
+   SPEED CARRIES A SIGN and three forces act on it. Drive and the
+   slope apply only with the wheels down; the two drags always do.
+
+   +-------------+---------------------------------------------------+
+   | drive       | gas adds, brake opposes whichever way it is going |
+   | slope       | ground behind minus ground ahead, so a climb      |
+   |             | subtracts and a descent adds                      |
+   | drag        | proportional - this is what sets the top speed,   |
+   |             | balancing the drive at about accel << 7           |
+   | friction    | a constant, and the reason it ever stops          |
+   +-------------+---------------------------------------------------+
+
+   BOTH DRAGS ARE NEEDED. The proportional one sets the top speed but
+   integer division floors small values to nothing, so alone it
+   leaves the car creeping for ever; the constant one brings it to
+   rest and gives a deadband a weak net force cannot overcome, which
+   is what a parked car on a shallow slope should do.
+
+   THE SLOPE TERM IS SCALED TO JUST BEAT FULL THROTTLE. Measured over
+   this terrain it reaches about 1100, so a shift of 6 gives a little
+   over 17 against a drive of 12. A shift of 4 was the first guess
+   and it made every hill unclimbable.
+
+   Measured with the gas held and then released, which is the whole
+   behaviour in one run:
+
+   +----------+--------+-------------------------------------------+
+   | slope    | push   | what the car does under full throttle     |
+   +==========+========+===========================================+
+   | -1080    |  -17   | loses, and rolls back down                |
+   |  -840    |  -14   | net -2, held by the friction deadband -   |
+   |          |        | it parks on the hill                      |
+   |  -348    |   -6   | drive wins, it climbs                     |
+   +----------+--------+-------------------------------------------+
+
+   With the gas released on a slope it rolls back at once, and
+   crossing onto a descent it accelerates again on gravity alone.
+
+   Measured with the controls held: the top speed settles near 1400,
+   about five times the demo's own car, and the spring throws the car
+   some 480 units clear of the ground off a ridge taken fast.
+
+   +-----------+-------------------------------------+
+   | Key       | What it does                        |
+   +===========+=====================================+
+   | z         | gas                                 |
+   | x         | brake                               |
+   | left      | steer left                          |
+   | right     | steer right                         |
+   | c         | the camera a quarter turn round     |
+   | a         | camera height: ground / car         |
+   | s         | ground colour: default / grey moon  |
+   | 1         | car <-> ship                        |
+   | up / down | ship: trim the nose up and down     |
+   | d / f     | the camera closer / further         |
+   +-----------+-------------------------------------+
+
+   FAST FORWARD MOVED TO TAB for this. main_sdl.c had f, and a host
+   that eats a letter makes it look like the demo ignores the key.
+
+   THE GROUND'S COLOUR IS ITS OWN 32 PALETTE ENTRIES, which is what
+   makes 's' possible at all. Voxel_Render clamps the land to 0 to
+   0x1f and Xcur_PalBuildGreyLow writes exactly that band and nothing
+   else - img 0x4e7d, the moon's own builder - so swapping it reaches
+   the land and leaves the craft and the sky alone. The default band
+   is kept from Xcur_PalBuild at entry and swapped back in.
+
+   THE FLAT PLAINS ARE A FLOOR, NOT A DIFFERENT GENERATOR. img
+   0x5174 clamps every cell below 0x10 up to 0x10, so each basin the
+   plasma dug comes out dead level - which is the wide flat ground
+   the demo parks its car on. The generator call is the same one
+   this part uses, mask 0x3fff, bias 0x2000, roughness 2; without
+   the floor the same terrain has almost no flat ground at all.
+   Scene 27 sets it up and scenes 28 and 29 inherit it.
+
+   THE MOON HAS NO WATER EITHER. img 0x4f72 sets the water level to
+   zero in that same part, which disables it in the renderer and in
+   the height probe both, so the surface is bare rock to the horizon
+   and the car drives on what would be the sea bed.
+
+   THE OPENING'S LAND IS A DIFFERENT TERRAIN, not a palette change:
+   0x7fff, 0x4000 and roughness 3 make it taller and rougher.
+
+   THE FLOOR AND THE WATER TOGETHER ARE OURS. The demo never pairs
+   them - it floors the ground only in the parts that have no water -
+   so with the default palette every floored basin fills to one
+   level and reads as a wide flat sea. That is a consequence of
+   wanting the flat ground in both modes, not something the demo
+   does.
+
+   THE CAMERA HEIGHT HAS TWO MODES and 'a' switches them. It always
+   clears the ground under itself; what it also clears is either the
+   ground under the car, which is the default, or the CAR. Hugging
+   the ground is right while driving - the camera rides the terrain
+   like the car does - but a jump leaves it behind: measured off a
+   ridge the car gets 600 to 1700 units up and the camera ends up
+   150 to 450 BELOW it, which throws the car off the top of the
+   frame. Tracking the car holds the lift at PLAY_CAM_RISE however
+   high it goes.
+
+   THE CAMERA HAS FOUR SLOTS a quarter turn apart - rear, side,
+   front, the other side - and 'a' steps through them. It does not
+   jump between them: the slot only moves the angle the camera is
+   easing onto, so the same ease that keeps it behind the car carries
+   it round. Stepping always goes the same way, because a quarter
+   turn is never the long way round once the difference is folded.
+
+   THE MODEL FACES THE OTHER WAY. Its own yaw is a half turn off the
+   direction of travel, so the mesh yaw carries 0x400 as well as the
+   negation the camera needs.
+
+   The arrow keys arrive as SDL keysyms, which the host passes through
+   untranslated - so the two constants in xcursion_play.h are SDL's
+   values and not ASCII.
+
+   THE HEADING AND THE CAMERA SHARE ONE CONVENTION, the renderer's: a
+   bearing of a looks along (+sin a, +cos a). The demo's own car does
+   not - its travel negates z, because its camera orbits rather than
+   follows - and carrying that into a chase camera swings the camera
+   opposite to the turn.
+
+   A TURN IS 0x800 IN THESE ANGLES, NOT 0x10000. The angles are held
+   in a word and only the low 0x7fc reaches the sine table, so a
+   difference taken across the word wrap reads as most of a circle
+   when the two are a few units apart. Easing that sends the camera
+   the long way round - it whips a full turn whenever the heading
+   crosses a boundary, which looks exactly like a camera spinning the
+   wrong way. Fold the difference into one turn before easing it.
+
+   AN OBJECT'S APPARENT ORIENTATION IS ITS YAW PLUS THE CAMERA'S, not
+   minus: Mesh_Draw latches yaw + cam_yaw at img 0x4664. The demo
+   proves it in the launch, where the camera turns -4 a tick and the
+   craft +4 to hold still. So a camera that tracks the car needs the
+   car's mesh yaw NEGATED, or the model counter-rotates at twice the
+   steering rate while the camera follows correctly underneath it.
+
+   THE CAMERA EASES ONTO THE CAR'S HEADING rather than snapping to it.
+   The whole landscape turns with the camera bearing, so a camera
+   locked to the heading makes the world jerk under every steering
+   input. Its height clears the HIGHER of the two grounds, the car's
+   and its own: taking only its own swings the framing as a slot
+   moves it onto different terrain, and taking only the car's lets a
+   hill between the two swallow the view.
+
+3.  The knobs
+
+   Every one of these is ours. They are all in xcursion_play.c and
+   nothing outside that file reads them.
+
+   +------------------+------------------------------------------------+
+   | PLAY_ACCEL       | engine. How hard the gas pushes, per tick -    |
+   |                  | raise it to climb better AND go faster         |
+   | PLAY_BRAKE       | how hard the brake pushes against travel       |
+   | PLAY_DRAG_SHIFT  | air drag, as a SHIFT: the force is speed >>    |
+   |                  | this. Bigger = less drag = faster and looser   |
+   | PLAY_ROLL_FRIC   | rolling friction, a flat amount. The reason    |
+   |                  | the car ever fully stops, and the deadband     |
+   |                  | that lets it park on a slope                   |
+   | PLAY_SPEED_MAX   | a HARD CEILING, and not what sets the top      |
+   |                  | speed - see below                              |
+   | PLAY_SLOPE_SHIFT | gravity along the ground, as a SHIFT. SMALLER  |
+   |                  | IS STRONGER. 6 now; 5 doubles the push, 7      |
+   |                  | halves it                                      |
+   | PLAY_SLOPE_PROBE | how far ahead and behind the slope is sampled, |
+   |                  | as a shift. Bigger reads longer hills and      |
+   |                  | ignores bumps                                  |
+   | PLAY_GRAVITY     | downward pull per tick while airborne. Bigger  |
+   |                  | = shorter, flatter jumps                       |
+   | PLAY_SPRING      | suspension stiffness, as a SHIFT. SMALLER IS   |
+   |                  | STIFFER and throws the car higher off a ridge  |
+   | PLAY_BOUNCE      | how much of the vertical speed is applied per  |
+   |                  | tick, as a shift. Smaller = livelier           |
+   | PLAY_AIR         | how far off the ground still counts as wheels  |
+   |                  | down for drive and slope                       |
+   | PLAY_STEER       | turn rate per tick, in angle units of 0x800    |
+   |                  | to the turn                                    |
+   | PLAY_CAM_DIST    | the camera distance d and f start from         |
+   | PLAY_CAM_NEAR    | closest d will go                              |
+   | PLAY_CAM_FAR     | furthest f will go                             |
+   | PLAY_CAM_STEP    | how much one tap moves it                      |
+   | PLAY_CAM_EASE    | how fast the camera settles, as a SHIFT.       |
+   |                  | SMALLER IS SNAPPIER                            |
+   | PLAY_CAM_RISE    | how high above the ground the camera rides     |
+   | PLAY_CAM_SLOT    | the angle one c tap moves, 0x200 being 90      |
+   | PLAY_MODEL_YAW   | the half turn the model needs to face forward  |
+   +------------------+------------------------------------------------+
+
+   The drag camera's own, in xcursion_look.c.
+
+   +------------------+------------------------------------------------+
+   | LOOK_YAW_NUM     | angle units per pixel of drag, over            |
+   | LOOK_YAW_SHIFT   | LOOK_YAW_SHIFT. One screen width is about one  |
+   |                  | full turn at 16 over 1                         |
+   | LOOK_PITCH_MAX   | how far the horizon will slide, in rows. The   |
+   |                  | renderer clamps itself either way, so this is  |
+   |                  | taste and not safety - section 4               |
+   | LOOK_EASE        | how fast a released view returns, as a SHIFT.  |
+   |                  | SMALLER IS SNAPPIER                            |
+   +------------------+------------------------------------------------+
+
+   The ship's own set. None of the car's forces reach it.
+
+   +------------------+------------------------------------------------+
+   | SHIP_ACCEL       | thrust per tick                                |
+   | SHIP_DRAG_SHIFT  | drag, as a shift - sets the top speed with     |
+   |                  | SHIP_ACCEL, the same way the car's does        |
+   | SHIP_SPEED_MAX   | a hard ceiling on speed                        |
+   | SHIP_STEER       | yaw per tick - lower than the car's            |
+   | SHIP_PITCH_RATE  | how fast up and down move the trim             |
+   | SHIP_PITCH_MAX   | how far the nose will go, 0x100 being an       |
+   |                  | eighth of a turn                               |
+   | SHIP_CLIMB_SHIFT | climb per tick, as a shift on sin(pitch) times |
+   |                  | speed. HIGHER IS GENTLER                       |
+   | SHIP_CEILING     | how high it may get                            |
+   | SHIP_CLEAR       | how low it may skim                            |
+   | SHIP_RISE        | how far above the ground it starts             |
+   | SHIP_AWAY        | how far from the car it parks                  |
+   | SHIP_MODEL_YAW   | its model's own facing offset                  |
+   +------------------+------------------------------------------------+
+
+3.1.  What actually sets the top speed
+
+   NOT PLAY_SPEED_MAX. That is a clamp the car never reaches. The top
+   speed is where the drive balances the two drags:
+
+       top  =  (PLAY_ACCEL - PLAY_ROLL_FRIC) << PLAY_DRAG_SHIFT
+
+   which is (12 - 1) << 7, about 1400. PLAY_SPEED_MAX sits at 0x600
+   so it only ever catches a runaway, such as a long descent adding
+   gravity to full throttle.
+
+   PLAY_DRAG_SHIFT also sets how LONG it takes to get there: the
+   speed closes on its top by one part in 2^shift each tick, so 7 is
+   a time constant of 128 ticks, a little over a second.
+
+   So the two have different jobs. PLAY_ACCEL changes the top speed
+   and the pickup together; PLAY_DRAG_SHIFT changes the top speed and
+   how heavy the car feels without touching the engine.
+
+3.2.  Climbing, and being pushed back
+
+   One number governs both: PLAY_SLOPE_SHIFT, and SMALLER IS A
+   STRONGER PULL. Measured over this terrain the raw slope reaches
+   about 1100, so at a shift of 6 the steepest ground pushes with
+   about 17 against a drive of 12.
+
+   +--------------------+--------------------------------------------+
+   | climbs too poorly  | raise PLAY_SLOPE_SHIFT to 7, or raise      |
+   |                    | PLAY_ACCEL                                 |
+   | climbs anything    | lower PLAY_SLOPE_SHIFT to 5                |
+   | parks on too much  | lower PLAY_ROLL_FRIC to 0, which removes   |
+   |                    | the deadband entirely                      |
+   +--------------------+--------------------------------------------+
+
+   Raising PLAY_ACCEL to climb better also raises the top speed, by
+   section 3.1. To climb harder WITHOUT going faster, raise
+   PLAY_ACCEL and lower PLAY_DRAG_SHIFT together.
+
+3.3.  Jumping
+
+   Two numbers, and they pull against each other. PLAY_SPRING is the
+   stiffness as a shift, so SMALLER IS STIFFER: at 3 the car takes an
+   eighth of its penetration depth as upward speed, and 2 would take
+   a quarter and throw it much higher. PLAY_GRAVITY is the pull that
+   brings it down, so lowering it floats the jump out longer.
+
+   Height is roughly the launch speed squared over twice the gravity,
+   so halving PLAY_GRAVITY doubles the height while stiffening
+   PLAY_SPRING by one quadruples it. Stiffen first; it is the one
+   that makes a ridge feel like a ramp rather than making the whole
+   world feel like the moon.
+
+   The spring only acts when the wheels are under the ground, so what
+   the car hits matters more than how fast it is going: a sharp ridge
+   throws it and a long rise does not.
+
+4.  The drag camera
+
+   HOLD THE LEFT BUTTON AND THE VIEW SWINGS WHILE THE SCENE PLAYS ON.
+   Nothing is paused and nothing is steered: the demo's camera flies
+   its own path underneath, and the drag only changes the angles it is
+   looked at through. Let go and the view eases back onto the demo's.
+
+   +------------------------------+----------------------------------+
+   | src/xcursion/xcursion_look.c | the offset and the ease          |
+   | src/xcursion/xcursion_look.h | the four calls                   |
+   +------------------------------+----------------------------------+
+
+   THE DEMO IS NEVER TOLD. Xcur_LookPush writes the offset into the
+   camera the renderer is about to read and Xcur_LookPop takes it out
+   again, both inside one frame with no simulation step between them.
+   That ordering is the whole design, and the reason it is not merely
+   tidy is Cam_FollowTerrain: its sky bias at img 0x98f7 is a running
+   sum, so a camera left modified for even one step would carry the
+   drag forward for the rest of the demo and never return.
+
+   Measured against an undragged run of the same frames: a 120-pixel
+   yaw rejoins it byte for byte 22 frames after release, a 70-pixel
+   pitch 12 frames after, and both stay identical for the 150 frames
+   that follow.
+
+   FOUR CALLS REACH IT - a mouse route, a tick for the ease, and the
+   push and pop around backdrop().
+
+   THE TWO AXES ARE NOT THE SAME KIND OF THING. Across is the camera
+   bearing and turns all the way round, because the terrain wraps at
+   256 by 256 and there is no edge to reach. Up and down is a HORIZON
+   SLIDE and not a pitch - nothing rotates, the whole picture moves on
+   the screen - so it clamps instead.
+
+   THE VERTICAL MOVES FOUR THINGS AND THEY MUST AGREE. The land rides
+   on the camera's yofs, the sky on its sky_bias, and the relation
+   that keeps those together is yofs = sky_bias * 320, which is what
+   Cam_FollowTerrain maintains at img 0x2001. The sky travels at twice
+   the land's rate because Voxel_Render subtracts the bias from its
+   table twice; that parallax is the demo's own and is kept.
+
+   THE FOURTH IS THE GLOBAL g_SkyBias AND IT IS NOT THE CAMERA'S.
+   ship() and ship_at() both build their mesh camera from the global,
+   so a push that moves only the XcurCam slides the land out from
+   under an object that stays exactly where it was. Both are lent to
+   the push for that reason. The car part is where it shows: the car
+   and the flagpole have to rise with the ground they stand on.
+
+   BOTH AXES GRAB rather than steer: the picture follows the pointer.
+   Drag right and the landscape goes right, which means the bearing
+   decreases - the renderer's angle runs the other way.
+
+4.1.  Which parts have it, and what each one can move
+
+   +---------------------------+---------+---------+------------------+
+   | part                      | across  | up/down | carrier          |
+   +===========================+=========+=========+==================+
+   | opening, approach,        | yes     | yes     | g_cam, through   |
+   | landscape flight          |         |         | backdrop()       |
+   | car                       | yes     | yes     | g_cam, inline    |
+   | chase, battle             | yes     | yes     | g_mc, in camera  |
+   |                           |         |         | space - 4.2      |
+   | launch, the departure     | yes     | NO      | loose arguments  |
+   | countdown                 | baked   | baked   | g_cam, once      |
+   +---------------------------+---------+---------+------------------+
+
+   THE DEPARTURE IS A DIFFERENT RENDERER, which is why it takes the
+   yaw and nothing else. Ground_Render - img 0x2621, where the shade
+   map is the height and the plasma is only the water test, the
+   opposite pairing from Voxel_Render - takes its bearing and scale as
+   loose arguments and HAS NO VERTICAL TERM AT ALL: its horizon is
+   fixed by di = 0xf8c0 and the dist ramp. There is nothing to slide,
+   so Xcur_LookYaw is read into the argument directly and no push is
+   needed, nothing having been mutated.
+
+   ITS CRAFT IS PLACED, NOT TRANSFORMED. anim_tick3 integrates
+   g_mc.tz and ty itself and never calls Mesh_Setup, so the craft
+   holds the centre of the frame however far the view swings and
+   turns in place rather than crossing the screen. Carrying the yaw
+   into a copy of its mesh camera is what keeps the face it presents
+   agreeing with the ground under it.
+
+   THE CAR PART IS THE SAFEST SITE IN THE DEMO. It re-latches wx, wy,
+   scale, yofs, sky_bias and water_scroll from the animation's own
+   globals at the top of every frame - img 0x35d7 and 0x3605 - so
+   even a leaked offset would be overwritten before it could be seen.
+   The push covers the landscape and all three objects together; they
+   need no handling of their own, because ship_at derives its mesh
+   camera from the camera's angle, position, scale and altitude.
+
+4.2.  The battle and the chase, where the objects are the view
+
+   THESE SCENES HAVE NO WORLD CAMERA AT ALL. draw_craft_a, draw_craft_b
+   and Shots_Draw write tx, ty and tz straight from the animation and
+   NEITHER SCENE EVER CALLS Mesh_Setup, so there is no bearing to add
+   to: the objects are already in camera space. That makes cam_yaw a
+   trap - Mesh_Draw latches yaw + cam_yaw at img 0x4664, so moving it
+   alone spins every craft where it stands instead of swinging the
+   view past it.
+
+   SO THE SWING IS A ROTATION OF EACH OBJECT'S POSITION, and it is
+   exact rather than an approximation. Mesh_Setup turns a world offset
+   by the camera bearing; rotation composes, so turning an already
+   camera-space position by the drag gives precisely what a bearing
+   that much further round would have produced. Neither scene applies
+   Mesh_Setup's own >> 6 and 7/8 squash, which do not commute with a
+   rotation, so there is nothing to spoil it.
+
+   Both terms are carried: the position is rotated, cam_yaw takes the
+   same yaw so the face each craft presents agrees with where it now
+   sits, and sky_bias takes the pitch, which for a mesh is a plain
+   screen-row shift of the projected y.
+
+   VEC_ROTATE3 RETURNS THE VECTOR TIMES 64 and the shift that pays it
+   back is the caller's. Its sine table is scaled to 4096 against a
+   >> 6, so the roll and pitch stages cancel out at zero but the yaw
+   stage does not; Mesh_Setup settles it at img 0x4634 and anything
+   else that calls the routine must do the same. Omitting it leaves
+   each object's translation 64 times too large while its vertices
+   stay their true size, so the model collapses to a dot at 64 times
+   its proper distance - the craft read as stars and vanish on the
+   smallest drag.
+
+   THE SHOTS GO THROUGH A COPY. Shots_Draw owns tx, ty and tz inside
+   its own loop at img 0x280b, so a push around it would be
+   overwritten once per shot. Their positions are swung in a local
+   copy instead, which leaves the transcription untouched. The
+   dead-shot test is x == 0, so a shot at rest is skipped rather than
+   rotated into life.
+
+   WHAT DOES NOT FOLLOW: the starfield, the chase's planet, and the
+   battle's glow, which is a fixed screen box. Section 4.4.
+
+4.3.  Pan, orbit, and which parts get which
+
+   THERE ARE TWO WAYS TO SWING A VIEW AND THE PARTS DO NOT AGREE ON
+   WHICH IS BETTER.
+
+   PAN is the camera turning where it stands: add the drag to the
+   bearing, put it back afterwards. It touches one field and asks no
+   questions, and for a landscape it is the right answer - the ground
+   fills the frame at every bearing, so turning never loses the
+   subject and the only thing an orbit would add is a camera that can
+   walk into a hill.
+
+   ORBIT turns everything about a point instead. Turning a camera
+   around a pivot while it keeps facing that pivot is, in camera
+   space, just rotating about the pivot:
+
+       p' = R(p - P) + P
+
+   so P holds its place on screen and the scene revolves around it -
+   one subtract and one add either side of the rotation. That is what
+   the battle needs, where the subject is a small object in empty
+   space and a pan slides it out of frame for nothing.
+
+   PAN IS A SUBSET OF ORBIT, NOT AN ALTERNATIVE TO IT, so there is no
+   flag and no second code path. A part that sets no pivot turns
+   about the camera, which IS a pan; the landscape parts go through
+   Xcur_LookPush, which has no pivot to set.
+
+   +-------------------+----------------------------------------------+
+   | opening, approach | pan                                          |
+   | landing, car      |                                              |
+   | launch            | pan, and no choice about it - section 4.1    |
+   | battle            | orbit on the midpoint of the two craft, or   |
+   |                   | craft A alone while B is away                |
+   | chase             | orbit on the craft itself, so it holds its   |
+   |                   | ground and only turns - a turntable          |
+   +-------------------+----------------------------------------------+
+
+   THE PIVOT IS EACH PART'S OWN, set once a frame before the draws.
+   Xcur_LookTick clears it first, so a part that wants one sets it
+   every frame and none can inherit another's.
+
+   CRAFT B IS NOT ALWAYS THERE. draw_craft_b returns early on
+   g_b_z < 0 at img 0x2701, so for part of the battle there is no
+   second craft and no midpoint to take; the pivot falls back to
+   craft A rather than lurching when B returns.
+
+   PRECISION IS NOT A PROBLEM HERE, which is worth stating because it
+   looks as though it should be. Vec_Rotate3's only truncation is a
+   >> 6 of a quantity already 64 times the answer, so rotating a
+   DIFFERENCE rather than a position still lands within one world
+   unit - a part in eight thousand of the battle's craft separation.
+
+   AN ORBIT MAKES THE FIXED STARFIELD MORE CONSPICUOUS, NOT LESS.
+   A pan slid the craft across the stars, which read as a camera
+   moving; an orbit holds them still, so the stars are the only thing
+   left that could say the view moved, and they do not. What carries
+   it instead is cam_yaw showing a different side of each craft and
+   the two craft parallaxing against one another. Section 4.4 is what
+   the stars would cost.
+
+4.4.  What rotating the starfield would take
+
+   Nothing here is implemented. This is what it would cost.
+
+   THE FIELD IS A TORUS IN 16-BIT SPACE, NOT A CLOUD OF POINTS. Every
+   subtraction in Points_Render is 16-bit and wraps - img 0x3222,
+   0x3227 and 0x322c are all word operations - so a star that leaves
+   one side of the volume arrives at the other. 1000 points fill that
+   volume uniformly and are never culled by distance, only by falling
+   off the screen.
+
+   SO ROTATING THE STARS THEMSELVES DOES NOT WORK. Rotation does not
+   commute with a modular wrap: turning a point in 32-bit space and
+   then wrapping it to 16 bits puts it somewhere unrelated to where
+   turning the wrapped difference would have put it. The field would
+   come apart rather than turn.
+
+   MOVING THE CAMERA DOES NOT WORK EITHER, and this is the one that
+   looks like the cheap answer. cx, cy and cz are a TRANSLATION and
+   the renderer has no camera orientation at all - changing them pans
+   the field, it cannot turn it.
+
+   WHAT WOULD WORK is rotating the DIFFERENCE, inside the projection,
+   after the 16-bit subtraction and before the depth shift:
+
+       ax = (s16)((pts.x - cx) & 0xffff)
+       ay = (s16)((pts.y - cy) & 0xffff)
+       az = (s16)((pts.z - cz) & 0xffff)     <- now SIGNED
+       rotate(ax, ay, az, pitch, yaw, 0)
+       d = (az >> 6) + 5                     <- az may be negative
+       if (d < 5) continue                   <- a near clip, which
+                                                the original has not
+       sx = ax / d + 0xa0 ; sy = ay / d + 0x64
+
+   THE ROTATION IS THE EASY HALF. The cost is the two lines after it.
+   The original takes its depth from an UNSIGNED shift of the wrapped
+   dz, which is what makes every star count as in front of the camera
+   however far round the volume it really is. Once the difference is
+   rotated, half the field genuinely passes behind the viewer, and
+   the renderer has no concept of behind - a star there reads as very
+   distant and is drawn anyway, in the wrong place. So z must become
+   signed and a near clip must be added, and that pair is a change to
+   the projection's meaning rather than an addition to it.
+
+   WHERE IT WOULD GO is a forked copy in our own file, called only
+   when the drag is non-zero, never an edit to Points_Render - the
+   transcription has to keep describing the binary.
+
+   THE ERASE VARIANT IS NOT ON THIS PATH. Points_RenderErase carries
+   a per-star record of the pixel it last lit, and rotating under it
+   would strand those; but the battle and the chase both clear the
+   frame and call the plain renderer, so only one scene would have to
+   care and it is not one of these.
+
+   WHAT IT WOULD BUY IS SMALL, which is the honest argument against
+   it. A uniform random field has no orientation to see: turning it
+   changes the direction the stars STREAM, not the picture. The
+   craft, the shots and the planet carry almost all of the readable
+   motion.
+
+   THE COUNTDOWN IS THE EXCEPTION IN KIND: it bakes backdrop() once at
+   entry and holds that image, so a drag still held across the
+   transition is frozen into its background rather than easing out.
+
+4.5.  LITHIUM's, and why it needs no pop
+
+   src/lithium/lithium_look.c, and it is the same gesture - hold the
+   button, swing, let go and it eases back - reached a different way.
+
+   THERE IS NO PUSH AND POP BECAUSE THE OFFSET EXPIRES ON ITS OWN.
+   Obj_LoadOrientA rewrites the camera slot's live ang_* and pos_*
+   out of the accumulators a_* and home_* at the top of every frame,
+   and Flight_Step integrates the accumulators alone - it never reads
+   the live pair back. So an offset written just after the load is
+   gone by the next one, with nothing saved and nothing restored.
+   XCURSION needs the pair because its camera IS its integrator
+   state; this camera is a copy made fresh each frame.
+
+   ONE FUNCTION CARRIES IT AND THE TRANSCRIPTION STAYS CLEAN.
+   Lith_CamLoad calls Lith_ObjLoadOrientA and then adds the drag, and
+   the nine places that loaded the camera call it instead - the
+   flyover, the approach, the battle's three, the tower fall's two
+   and the tunnel. Putting the adds inside Obj_LoadOrientA itself
+   would have been fewer edits and would have left an ORIGIN header
+   describing a routine that had grown a feature.
+
+   THERE IS NO WHITELIST. Every part that has a camera can be swung,
+   including the ones never meant to be looked away from.
+
+   IT TURNS ON THE SPOT. Scene_Project translates by the camera's
+   position and THEN rotates, so the whole vertex pool swings about
+   the eye - terrain, craft, tower and tunnel rings together. Nothing
+   orbits and there is no pivot, which is the opposite of 4.3.
+
+   LOOKING BACKWARDS IS CLEAN. The near plane is a clamp rather than
+   a reject, so geometry behind the eye lands on z = 0x7d and sums to
+   0x177 across a triangle - under every depth_near the scenes pass
+   Scene_CullSort, so it is dropped rather than smeared. The tunnel
+   is the one worth trying: a full half turn leaves the bore solid
+   all round, because the eye is inside a tube rather than looking at
+   one.
+
+   The constants are ours and were chosen by feel: one screen width
+   is one full turn against a circle of 0x2000, pitch is clamped to
+   0x500 either way, and a released view eases back by a quarter of
+   what is left each frame.
+
+5.  LITHIUM: flying the demo's own craft
+
+   src/lithium/lithium_game.c, one file, with its own sub-part list
+   so the endless tunnel and the running man can join it without
+   touching anything else.
+
+5.1.  There is no flight model here
+
+   THE DEMO ALREADY IS ONE, AND IT WAS ALWAYS MEANT TO BE FLOWN.
+   Its motion is recorded mouse input and the recorder shipped in
+   the binary - ../docs/lithium/effects/tracks.txt. Track_Play is
+   the whole bridge between that recording and Flight_Step, and it
+   writes four fields:
+
+       pitch_acc  -=  vertical delta   << 5
+       yaw_acc    +=  horizontal delta << 5
+       command     =  a six-bit key index
+       throttle    =  two bits
+
+   Writing those from the keyboard instead of from the asset segment
+   is the entire feature. Flight_Step then eases the attitude toward
+   the accumulators, banks and levels the roll, drives the throttle,
+   clamps to the ground and fires the guns - all of it the demo's,
+   none of it rewritten.
+
+   THE CHASE CAMERA IS A COMMAND, NOT A CAMERA RIG. 0x18 overwrites
+   a slot's flight position with the lead's plus (0, 0, -0x60) turned
+   by its own pitch and yaw, which is how the recorded camera stayed
+   behind its craft. Giving the eye the craft's steering and then
+   that command is the whole follow-cam, and Flight_Step's own
+   trailing ease makes it lag rather than stick.
+
+   PARKING THE EYE ON THE CRAFT LOOKS LIKE A RENDERER FAULT AND IS
+   NOT ONE. The ship is then at distance zero, and the near plane
+   clamps rather than rejects, so it smears across the view as a
+   long sliver.
+
+   The keys are one block at the top of the file: the arrows steer,
+   and the rates are ours, chosen by feel - a held key is applied
+   every tick where a track entry lands every sixth, so the scale is
+   that much smaller.
+
+5.2.  Reaching it
+
+   It is a part after the finale, so ] walks into it, g jumps
+   straight to it, and the demo runs into it on its own when the
+   running man is done. The two keys go through the same jump, so
+   they cannot drift apart.
+
+   THE HANDOVER IS NOT THE DEMO'S OWN TEST, AND COULD NOT BE.
+   Lith_FinaleDone at img 0x11c6 is the one test in the demo that
+   waits for the module to WRAP rather than to reach a position, and
+   what the original does when it fires is start the demo over. The
+   reconstruction's clock walks the order list and stops at the end
+   rather than beginning it again, so that test can never come true
+   here; it is left standing as the transcription it is.
+
+   What the handover watches instead is the tick reaching the end of
+   the order list, which music_build_timeline already parks one past
+   the last entry. It is the same moment reached by a route the
+   clock can answer, and it needed no change to the clock, the
+   timeline or the part table. Two independent numbers agree on it:
+   the emulator gives 951 ticks of finale, frames 20044 to 21213,
+   and the order table gives 952, tick 12797 to 13749 [verified].
+
+   GOING TO THE PLAYGROUND RATHER THAN ROUND AGAIN IS OUR CHOICE.
+   The demo loops for ever at that point and this does not.
+
+5.3.  The controls, and what bounds the craft
+
+   +-----------+-----------------------------------------------+
+   | arrows    | steer - a rate into the accumulators          |
+   | z         | fire; in the runner, wind the walk forward    |
+   | x         | in the runner, wind the walk back             |
+   | x / c     | the speed ladder, or a held dial - 5.4        |
+   | wheel     | the runner's zoom, with the cursors           |
+   | 1 - 4     | pick a sub-part - section 5.4                 |
+   | s         | the runner's smear; the paint's lights        |
+   +-----------+-----------------------------------------------+
+
+   THE SPEED LADDER IS THE DEMO'S. Commands 0x0a to 0x17 are the
+   fourteen speeds Flight_Step reads at img 0x5c4f as
+   (command - 9) * 2 - 1, the odd numbers 1 to 27. The game holds an
+   index and writes the matching command; the ladder itself is not
+   ours.
+
+   THE DEMO HAS TWO WEAPONS AND ONLY ONE OF THEM IS A SHOT. Command
+   0x19 drives the plasma, which is a ring of trail records - a PUFF
+   - and its tail zeroes the firing craft's x and z at img 0x5e1e,
+   parking the ship at the origin. What the battle launches as an
+   actual shot is a MESH: img 0x2123 loads a four-vertex tetrahedron
+   at 0x724a, img 0x66df copies the firing craft's position and
+   attitude into one of six slots at speed 0x1e0, and
+   Flight_StepRoll flies it with no throttle, no easing and no
+   turning. img 0x66d7 keeps a craft from running both at once.
+
+   The game launches the mesh. Only the life is ours: the demo never
+   expires a bolt, it recycles the six round robin and lets the rest
+   fly on for ever.
+
+   THE BOLT IS DRAWN BIGGER THAN THE BATTLE'S AND HAS TO BE. A shot
+   fired along the view axis from a chase camera recedes to the
+   vanishing point rather than crossing the screen, so four vertices
+   at the battle's scale of 0xe are sub-pixel within a tick - drawn
+   correctly, and invisible. The battle gets away with 0xe because
+   its bolts come from other craft and cross the view.
+
+   THE EYE CHASES THE DRAWN SHIP, NOT THE FLOWN ONE. Command 0x18
+   offsets from the lead's FLIGHT position at img 0x5c89, while the
+   model is drawn at its HOME, which Flight_Step trails a
+   thirty-second behind - about thirty-two ticks of travel. The
+   recorded camera could use 0x18 because its own home lagged by the
+   same amount and the two errors cancelled; tighten the eye and
+   they stop cancelling, and it ends up IN FRONT of the ship it is
+   following, which looks exactly like the ship having vanished.
+   Taking the offset from home_* and the bearing from a_* leaves one
+   lag instead of two, and that one is ours to set.
+
+   THE FLOOR WAS ALREADY THERE AND IS THE TERRAIN ITSELF.
+   Flight_Step pins a craft to the surface at img 0x5d40, so a hill
+   lifts the ship over it with nothing added. What the demo never
+   needed was a ceiling, because a recorded track could not fly
+   away; the game adds one, measured from the ground so the terrain
+   stays in sight, along with a hull's clearance at the floor. Both
+   are ours and both are one constant.
+
+5.4.  The sub-parts
+
+   One file holds them and a number key picks one, the way
+   sim/run.py does. Entering a sub-part runs its own setup, so
+   switching is repeatable: the same key twice gives the same frame
+   to the pixel [verified].
+
+       1   the flight - section 5.3
+       2   the tunnel, and it does not end
+       3   the runner, orbited
+       4   a sheet to paint on
+
+   THE TUNNEL WAS ALREADY ENDLESS. Nothing in Tick_Tunnel at img
+   0x6b7f bounds it - the eye walks the path, the ring window
+   advances every sixteen ticks, and the coordinates are words that
+   wrap rather than run away. What stops it in the demo is
+   Lith_TunnelDone asking the music, and the game does not ask.
+
+   THE SEEDING IS IN THE SHATTER'S HANDOVER, NOT IN Lith_TunnelEnter,
+   which only clears a flag. img 0x0964 is what sets the eye flying
+   and img 0x09b0 and 0x09b7 clear the flash and steepen the ramps.
+   A tunnel entered without them sits still in the dark - which is
+   what a cold jump to the demo's own tunnel part does.
+
+   THE COST DOES NOT GROW, which is worth saying because it looks as
+   though it should: Tunnel_Build walks and discards first_ring path
+   steps before it writes a vertex, and first_ring counts up for
+   ever. Measured flat at 175 ms per thousand ticks from the first
+   thousand to the eighth - about a hundredth of the tick budget -
+   because the ring only advances once in sixteen.
+
+   THE RUNNER IS ONE PHASE WORD AND NOTHING ELSE. Nothing about the
+   figure is keyframed: all twelve limb joints come out of a single
+   cosine sample off g_WalkPhase, with the left side read half a
+   cycle later. So the walk's speed is one number - Tick_Finale adds
+   0x40 a tick at img 0x659c - and because the pose is a pure
+   function of the phase, every value is legal. z and x are a SLIDER
+   rather than a set of notches: held, they wind the step forward
+   and back, through zero into reverse, stopping at a turn and a
+   half a tick either way.
+
+   IT IS SYMMETRIC ABOUT ZERO, which is what shows the reverse to be
+   the same cycle and not a different one. Winding back from the
+   demo's pace the frames change by 76, 110, 70, 53, 30, 47, 16,
+   then NOTHING at all, then 16, 47, 30, 53, 70, 110, 76 - the same
+   figures mirrored [verified].
+
+   THE ORBIT IS BUILT AROUND THE FIGURE, AND THE DEMO'S EYE IS NOT.
+   img 0x115d, 0x117b and 0x1185 frame him low and to the right off
+   a bearing of 0x1200 - a composition, not a target - so turning
+   that arrangement about the scene's origin orbits a point he is
+   nowhere near. What it looks like is a camera swinging around
+   empty space while the figure drifts across the frame.
+
+   SO THE CENTRE IS MEASURED. game_run_centre averages the figure's
+   own vertices out of the scene pool once a frame, and the eye goes
+   at that point plus a turned offset. Building the offset the same
+   way round that Scene_Project unbuilds it - Y then X - makes the
+   two cancel exactly, so he sits dead centre at every bearing and
+   every distance [verified: 158 to 160 across x and 99 to 101
+   across y through a full turn, against a screen centre of
+   160, 100].
+
+   THAT IS ALSO WHAT LETS THE ZOOM ARRIVE. Pointed at him rather
+   than past him, closing the radius fills the frame: measured 16 by
+   31 pixels at the far end and 320 by 200 - the whole screen - at
+   the near one.
+
+   IT HOLDS WHERE IT IS PUT. The drag anchors on the press and
+   commits on the release; nothing eases back, which is the opposite
+   of 4.5 and the reason the runner has its own camera state rather
+   than borrowing lithium_look.c.
+
+   THE ZOOM IS GEOMETRIC AND RUNS FROM GONE TO INSIDE HIM. A fixed
+   step that reads well far out is a jump up close, so each notch
+   multiplies; the cursors are fine and the wheel takes six at once.
+
+   THE NEAR CULL STILL BOUNDS IT. Scene_CullSort throws away a face
+   whose three z values sum to the threshold or less, which at the
+   demo's 0x4e2 takes the near half of him; Lith_FinaleNearSet
+   lowers it. NOT BELOW 0x177, though - that is what geometry behind
+   the eye sums to once the projection CLAMPS its z rather than
+   rejecting it, and drawing that smears the whole screen.
+
+   THE WHEEL IS A HOST CAPABILITY, not a demo one. Demo_Wheel joins
+   src/host.h beside Demo_Key and main_sdl.c answers SDL_MOUSEWHEEL
+   with it. The two demos with no use for a wheel answer with
+   nothing - they must still ANSWER, because the hosts are shared
+   and the linker does not know which demo it is building.
+
+   THE PAINT SHEET IS THE BUMP SCENE WITH THE BRUSH TAKEN OUT OF ITS
+   HANDS. Dust_Stamp adds an eight by eight brush into a height
+   field with saturation, Height_Relax diffuses the field, and
+   Bump_Render lights the result against the three-glow picture.
+   The demo drives the stamp from a thousand drifting particles; the
+   mouse drives it here, and nothing else about the chain changes.
+   A drag is joined point to point, because a mouse is sampled per
+   event and a quick sweep would otherwise come out dotted. z wipes
+   the sheet.
+
+   IT IS NOT THE DEMO'S PLASMA, which is worth saying because the
+   name is taken: LITHIUM's plasma is the ring of trail records the
+   battle fires - lithium/effects/trail.txt - and the flight's gun already
+   uses it. This is the other surface, and what it looks like is
+   raised metal rather than a field of colour.
+
+   TWO OF THE DEMO'S OWN SETTINGS HAD TO GO. The relax is HUNGRY:
+   fed a thousand particles a tick it reads as a surface settling,
+   but run every tick against one hand it wipes a stroke out in
+   about a second, so it opens at one tick in eight here. And one
+   pass of the brush barely dents a field the renderer reads as a
+   gradient, so a dab lays it down several times over. Both are
+   ours and both are one constant - GAME_PAINT_DISDEF and
+   GAME_PAINT_WEIGHT, the second being how high the pen raises the
+   surface. The field saturates at 0xff, so a weight high enough
+   draws a plateau with a hard edge rather than a ridge.
+
+   X AND C ARE THE DISSOLVE, and they meter relax PASSES because
+   that is the only rate the diffusion has: Height_Relax does one
+   fixed pass with no strength of its own. The dial is scaled so
+   its travel is the span that differs - measured, a pass every
+   eight ticks still has the stroke spreading after a hundred, one
+   a tick takes it out in about sixty, and two a tick wipe it
+   before the drag finishes [verified]. A slider counting whole
+   passes would spend seven eighths of its travel on rates that all
+   look alike, so the unit is the accumulator's denominator: 0
+   never settles, the default is a pass every eight ticks, and the
+   top is two a tick.
+
+   S IS THE ANIMATED LIGHT AND THE RUNNING PALETTE, on by default
+   and one branch, so it stops both together and leaves the sheet
+   lit by wherever the light stood. The colour kick is the bump
+   scene's own (0x73, 0x50, 0x0b) at img 0x6b1d, called a tick at a
+   time the way that scene calls it - which is what makes the
+   surface's colours run rather than its shading alone. In the
+   runner the same key is the smear; it is the only key in the game
+   that means two things.
+
+   PAL_ANIMATE CARRIES ITS OWN STEP - 0x0d, 0x10 and 0x15 onto the
+   three phases before it reads the table, img 0x6b2f - so the
+   colours move at that rate whenever it is called at all, and
+   scaling Pal_PhaseAdd's three constants down to nothing would not
+   hold them still. Only not calling it does.
+
+   THE LIGHT CIRCLES because a fixed one flattens the relief, and
+   Bump_Render takes it as arguments rather than reading a global -
+   so the game can move it without an accessor. The demo's own
+   randomised light is not borrowed: it drifts, where this wants a
+   cycle that comes back.
+
+   THE LIGHT IS NOT IN PIXELS AND THAT IS THE TRAP. Bump_Render
+   takes the pair as 16-bit accumulators and reads them SHR 8 as a
+   coordinate in the 256 by 256 picture, so a pixel of zero slope
+   samples the picture AT THE LIGHT - lithium/effects/bump.txt
+   section 4. A screen coordinate handed in unscaled moves it by one
+   picture unit across the whole screen and the surface reads as
+   lit by nothing.
+
+   THE ORBIT'S GEOMETRY IS THE GLOW TABLE'S. Tex_BuildThreeGlows
+   lays three glows of radius 0x3f at picture (0x40,0x70),
+   (0xb0,0xc0) and (0xc0,0x40), and its two loops count DOWN while
+   the write index counts up, so in the buffer they sit mirrored at
+   (0xc0,0x90), (0x50,0x40) and (0x40,0xc0) [verified]. The orbit
+   takes their centroid, (0x70,0x85), and carries the glow radius -
+   which is what walks the light across each glow in turn instead of
+   through the black between them. Nothing about it is tuned to a
+   picture.
+
+
+   THE SMEAR IS OFF HERE AND ON EVERYWHERE ELSE. Lith_FinaleEnter
+   puts the step, the smear and the near cull back to the demo's
+   values, so part 14
+   cannot inherit anything the game set. With the smear off the
+   accumulator is deliberately LEFT STANDING rather than kept in
+   step: turning it back on blends in the pose it was holding, and
+   that lingering ghost is wanted.
+
+5.5.  What it costs the demo
+
+   Nothing that was not already true. After three hundred frames in
+   the game, fourteen of the demo's fifteen parts redraw identically;
+   the fifteenth is the fade-to-black after the opening, which comes
+   out slightly different because it replays through the rock intro
+   and the shared flare and flicker state has moved on.
+
+   THAT ONE IS NOT THE GAME'S DOING. Three hundred frames in the
+   demo's own finale produce exactly the same difference, to the
+   pixel - so it is a property of any part running at all, not of
+   this one [verified by the control].
+
+   The eleven byte-exact checks are unaffected, because nothing in
+   the game runs unless the game part is the one selected.
+
+6.  Open questions
+
+   o The handling constants are a first guess. Acceleration, braking
+     and the camera distance have not been tuned against anything.
+
+   o The starfield does not swing with the chase and the battle, nor
+     does the chase's planet, which takes a pan of its own rather
+     than a camera bearing, nor the battle's glow, which is a fixed
+     screen box. Section 4.4 is what the stars would cost.
+
+   o Nothing bounds the world. The terrain wraps at 256 by 256, so
+     driving is endless and there is no course, no lap and no
+     collision with the props the demo's own car part parks nearby.
+
+   o LITHIUM's demo does not loop. The original restarts when the
+     module wraps; the reconstruction's clock saturates at the end
+     of the order list instead of wrapping, so nothing here comes
+     back round. It is independent of section 5.2's handover, which
+     deliberately does not need it.

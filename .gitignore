@@ -1,0 +1,66 @@
+# The Ghidra project and the three original executables. Not ours to
+# redistribute, and the .rep is a database rather than a reviewable file -
+# its findings reach the repository through reverse/exports/ instead.
+# See CLAUDE.md rules 7 and 11.
+reverse/ghidra/
+
+# Generated from the database, one directory per program (rule 7).
+reverse/exports/*/*map.txt
+
+# Depacked images are derived from a binary we do not redistribute, so
+# they are not ours to publish either. The depacker in tools/unpack/ and
+# the notes beside it are what travel; the bytes are regenerated with
+# `py -3.10 tools/unpack/xcur_unpack.py`.
+#
+# xcursion.json IS committed: it is a handful of recovered header fields,
+# not image data, and it is what says which load segment a regenerated
+# dump must use.
+reverse/unpacked/*.bin
+reverse/unpacked/*.EXE
+reverse/unpacked/*.exe
+
+# Assets pulled out of a depacked image - the music module and anything
+# like it - stand on the same footing: derived from a binary we do not
+# redistribute, and the authors' work rather than ours. The extractor in
+# tools/ and the notes beside it are what travel.
+reverse/unpacked/*.s3m
+reverse/unpacked/*.mod
+reverse/unpacked/*.xm
+
+# The MCP server registrations. One machine's layout, and two of the
+# three servers live outside this repository, so no relative path or
+# variable makes it portable. .mcp.json.example IS committed: copy it
+# and fill in the paths. CLAUDE.md rule 2.1 for the port that matters.
+.mcp.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Editors
+.vs/
+.vscode/
+*.user
+
+# Build output, once src/ exists. ANCHORED, and no bare *.exe or *.obj.
+#
+# An unanchored *.exe matches DIRECTORIES too, and the export directories
+# are named after their program - so `*.exe` silently excluded the whole
+# of reverse/exports/XCURSION_U.EXE/. Keep build-output patterns pinned
+# to where the build actually puts things.
+/build/
+/src/Debug/
+/src/Release/
+/src/*.obj
+/src/*.exe
+
+# Scratch
+*.tmp
+*.bak
+*.log
+
+# The MSVC port. Build output and vendored third-party libraries.
+/build/
+/src/.vs/
+/src/*.user
+/src/third_party/

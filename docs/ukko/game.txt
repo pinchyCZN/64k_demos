@@ -1,0 +1,338 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                        THE UKKO BICYCLE GAME
+
+
+Abstract
+
+   What follows the demo. UKKO.EXE ends at keyframe 0x2b6 and hands
+   over to a side-scrolling bicycle game, and this document describes
+   that game.
+
+   NOTHING HERE IS A RECONSTRUCTION. The game is our own work, not a
+   transcription, so the evidence tags of docs/README.txt section 2 do
+   not apply to it - there is no binary to be right or wrong about.
+   The music that keeps playing underneath it is the demo's own S3M,
+   and that is the only part of the scene the original contributed.
+
+   It lives in src/ukko/ukko_game.c behind three entry points and
+   shares nothing with the demo's renderer but the framebuffer and the
+   line drawer.
+
+Table of Contents
+
+   1. The Primitive Model
+   2. The Road
+      2.1. Why A Bump Is Wider Than The Wheelbase
+      2.2. When A Bump Is Put Back
+   3. The Rider
+      3.1. The Head
+   4. Physics
+      4.1. The Lean
+      4.2. The Crest Launch
+      4.3. The Jump
+      4.4. The Wheelie
+      4.5. The Throttle
+   5. Controls
+   6. Open Questions
+
+1.  The Primitive Model
+
+   The bike is DATA, not code: a table of primitives in model space,
+   each carrying its own thickness, and one transform maps them to the
+   screen. Moving a wheel means editing a number.
+
+   +-----------+---------------------------+-----------+
+   | Primitive | Fields                    | Thickness |
+   +===========+===========================+===========+
+   | line      | ax, ay -> bx, by          | 1 to 5    |
+   | circle    | ax, ay centre, by radius  | 1 to 5    |
+   +-----------+---------------------------+-----------+
+
+   A circle ignores bx and reads its radius out of by, which keeps the
+   table one shape rather than a union.
+
+   Thicknesses are deliberately unequal, so the stick man stays the
+   finest thing on screen: road 5, wheels 3, frame 2, rider 1.
+
+   The model origin is THE REAR AXLE, which is also what a wheelie
+   pivots about, so the transform needs no second centre.
+
+   That split is the path to the isometric version. Today the
+   transform is a rotation and a translation in two dimensions; a
+   three-dimensional one replaces xf_pt and gives Prim a z, and
+   nothing that describes the bike has to change.
+
+   A circle is drawn as AN ANNULUS TEST, not a plotted arc: every
+   pixel of the bounding box is in if its squared distance from the
+   centre falls between the inner and outer radii. Squared throughout,
+   so there is no square root and no accumulated error, and a
+   thickness of one is as exact as a thickness of five.
+
+2.  The Road
+
+   Flat ground at y = 150, plus bumps. A bump is a triangle - half
+   width w, height h, centred on a world x - so its height is linear
+   in the distance from its centre. Bumps are put back out ahead once
+   they have left the screen - section 2.2.
+
+   The generator is a plain linear congruential one, seeded fixed, so
+   the course is identical every run. A jump cannot be practised
+   against a road that changes.
+
+2.1.  Why A Bump Is Wider Than The Wheelbase
+
+   Two constraints on the generator, and between them every special
+   case in the physics disappears:
+
+   +------------------------+--------------------------------------+
+   | Constraint             | What it prevents                     |
+   +========================+======================================+
+   | w >= wheelbase + 2     | the bike bridging the bump, so the   |
+   |                        | peak passes between the wheels and   |
+   |                        | neither of them touches it           |
+   | slope under 45 degrees | the lean clamping, which leaves the  |
+   |                        | front wheel short of the road        |
+   +------------------------+--------------------------------------+
+
+   With both held, both wheels sit on the surface by construction.
+
+2.2.  When A Bump Is Put Back
+
+   There are eight bumps and they are reused: once one has gone by it
+   is moved out beyond the furthest, with a fresh width and height.
+
+   IT MAY ONLY BE REBUILT ONCE ITS WHOLE WIDTH HAS LEFT THE SCREEN,
+   and that is a stricter test than it sounds. The bike does not sit
+   at the left edge - it sits BIKE_SCREEN_X into the view, and the
+   road is drawn a margin further still, so the leftmost visible
+   world x is behind the bike by the sum of the two. A bump centred
+   less than its own width to the left of that is partly on screen,
+   and rebuilding it there changes its shape in front of the viewer:
+   it appears to flatten out while still in view.
+
+   SO THE RECYCLER AND THE RENDERER HAVE TO AGREE ON WHERE THE SCREEN
+   ENDS. They are the only two places that care, and one owns the
+   answer - the margin and the left edge are each defined once.
+
+3.  The Rider
+
+   OUR skeleton, not the demo's, and simpler: nine joints against
+   twelve. The demo's own mapping is formats/pose.txt section 3.
+
+   THE FEET ARE THE PEDAL CIRCLE and everything else follows from
+   where they are. There are no keyframes: the hips and shoulders are
+   fixed to the frame, the feet are driven by the crank phase, and
+   knees and elbows are solved.
+
+   The solver is two-bone inverse kinematics in closed form. The knee
+   is where two circles meet - one of thigh length about the hip, one
+   of shin length about the foot - and a flip flag picks which of the
+   two intersections to use, which is the whole difference between a
+   knee and a backwards knee.
+
+   Thigh plus shin must reach the furthest pedal position or the leg
+   detaches.
+
+3.1.  The Head
+
+   A TRIANGLE, because the demo's is. Its skeleton has exactly one
+   closed loop - joints 0, 10 and 11, formats/pose.txt section 3 - and
+   that loop sits at the crown: its base midpoint is 0.007 of the way
+   down the figure and joint 0, the neck, is 17 px below it. So the
+   head is a WEDGE, flat across the top of the skull with its apex
+   down in the neck.
+
+   +-----------------+----------+------------------------+
+   | Measure         | Median   | Of figure height       |
+   +=================+==========+========================+
+   | base, 10 to 11  |  12.4 px | 0.085                  |
+   | apex to base    |  17.3 px | 0.119                  |
+   | figure height   | 146.0 px | -                      |
+   +-----------------+----------+------------------------+
+
+   Our rider is about 46 px tall, so the same proportions give a base
+   of 4 and a height of 5. Both are defines.
+
+   THE RIDER LOOKS FORWARD, NOT AT THE CAMERA, and that is the whole
+   difference from the demo. The triangle lies in the plane across the
+   face, and the camera is side on, so the plane is edge on: all three
+   vertices land on one screen x and the head draws as a bare vertical
+   line. That is correct, not a missing head.
+
+   It is the one real projection in the game, and the only piece
+   already written as though the world were three-dimensional.
+
+   +-------+------------------------+----------------------------+
+   | Turn  | About                  | What the camera sees       |
+   +=======+========================+============================+
+   | yaw   | the head's up axis     | WIDTH ONLY - the triangle  |
+   |       |                        | swings out of its plane    |
+   | pitch | the side axis, which   | a lean, directly           |
+   |       | the camera looks along |                            |
+   +-------+------------------------+----------------------------+
+
+   So a yaw never draws a wider triangle - it draws the demo's own
+   triangle rotated, and the width that appears IS the turn.
+
+   Each axis has its own sine and its own period, so the two never
+   lock into one motion. All four values are defines and are meant to
+   be changed; as they stand the yaw is +/- 70 degrees on a 0.8 s
+   sweep and the pitch +/- 30 degrees on 2.5 s.
+
+   An amplitude comes back a fraction under whatever it is set to.
+   The sine table has 256 entries to a turn, so an angle quantises to
+   about 1.4 degrees.
+
+   The arithmetic stays 8.8 until the last step. Rounding each vertex
+   to whole pixels before projecting would open a four-pixel base by
+   one pixel and lose most of the sweep.
+
+   AT THESE PROPORTIONS THE SWEEP IS SMALL. The drawn width is
+   HEAD_BASE * sin(yaw), so a four-pixel base is one pixel wide
+   looking straight ahead and three at either extreme. The demo's
+   head is three times the size because its figure is three times the
+   size. HEAD_BASE and HEAD_LEN are the dials if a broader head is
+   wanted; nothing else depends on them.
+
+4.  Physics
+
+   All angles are 8.8 fixed point in SINE TABLE STEPS, 256 to a turn,
+   so 45 degrees is 32 steps and the sine table is indexed directly.
+   The bike's vertical position is carried in 8.8 as well as in whole
+   pixels; an integer-only position truncates the fraction every frame
+   and halves the height of a jump.
+
+4.1.  The Lean
+
+   sin(angle) IS (front - rear) / wheelbase, exactly, because the
+   axles are a wheelbase apart along the bike.
+
+   THE SIGN MATTERS: a front wheel on a bump is HIGHER, which is a
+   SMALLER screen y, which is a NEGATIVE angle and a nose pointing up.
+
+   The angle comes back from a scan of the sine table rather than from
+   a small-angle approximation, which on a steep bump would leave the
+   front wheel short of the road by a pixel or two. A hundred and
+   thirty compares a frame is nothing.
+
+   ON A WHEELIE THE REAR WHEEL IS THE ONLY CONTACT, so the front stops
+   sampling the road entirely. Otherwise a bump under a lifted front
+   wheel still tips the bike.
+
+4.2.  The Crest Launch
+
+   The bike leaves the ground at a crest, not at a key press.
+
+   Slope is read ACROSS THE WHEELBASE, not between frames. The
+   frame-to-frame climb on a rideable ramp is about one pixel, which
+   integer truncation swallows; the rise over 28 pixels is ten times
+   that and survives.
+
+   THE STEEPEST NOSE-UP IS LATCHED, not compared against the previous
+   frame. Crossing a peak, the slope sweeps from nose-up to nose-down
+   gradually over a whole wheelbase, so it is never steep on one frame
+   and level on the next - a test that wants both at once never fires
+   at all. The latch is cleared on flat ground and when it launches.
+
+   The velocity it imparts is scaled by a gain, and that gain is
+   unphysical on purpose: the true vertical speed off one of these
+   ramps lifts the bike six pixels, which is not a jump. The ramp's
+   rotation carries on into the air, so the bike pitches nose-up off a
+   crest and lands as it fell.
+
+   Over 900 frames of the fixed course, ridden at idle, the bike is
+   airborne for 119 of them.
+
+4.3.  The Jump
+
+   VARIABLE HEIGHT, the way a platformer's is. The press buys the same
+   push every time, and HOLDING buys a weaker gravity while the bike
+   is still rising, up to a fixed number of frames. Measured:
+
+   +-------------+---------+
+   | Frames held | Apex    |
+   +=============+=========+
+   |           1 |   17 px |
+   |           5 |   23 px |
+   |           9 |   28 px |
+   |          13 |   33 px |
+   |          17 |   35 px |
+   |          60 |   35 px |
+   +-------------+---------+
+
+   No amount of leaning on the key goes past 35.
+
+   CUTTING GRAVITY RATHER THAN ADDING THRUST is what keeps the arc
+   looking like one arc. Extra impulse part way up reads as a second
+   shove.
+
+4.4.  The Wheelie
+
+   HELD, not toggled. The lean ramps to 45 degrees over ten frames
+   while the key is down, holds there, and ramps back when it is
+   released. It is a second angle that simply adds to the ground's,
+   because both are in the same units.
+
+4.5.  The Throttle
+
+   THE PRESS IS A STEP AND WHAT FOLLOWS IS A RAMP. Holding the key
+   jumps straight to the fast speed, then keeps building to twice
+   that; letting go eases back to idle rather than dropping. Speed is
+   in 64ths of a pixel per frame, and the three rates and two ramp
+   times are defines.
+
+   +--------------------+--------------+----------------+
+   | State              | 64ths/frame  | px/frame       |
+   +====================+==============+================+
+   | idle               |          150 | 2.34           |
+   | the press itself   |          220 | 3.44           |
+   | held to the top    |          440 | 6.88           |
+   +--------------------+--------------+----------------+
+
+   As they stand it reaches the top 3 s after the press and is back
+   at idle about 2.2 s after release.
+
+   TWO THINGS KEEP THE RAMP SMOOTH, and without either it reads as a
+   gearbox rather than a throttle:
+
+   o  The travel carries its remainder. There are only five whole
+      pixel rates between idle and flat out, so truncating the
+      division every frame quantises the whole ramp to five speeds.
+
+   o  The ramps accumulate rather than dividing a range by a frame
+      count. A plain step of range/frames truncates to zero once the
+      period passes about four seconds, and the throttle would then
+      silently stop ramping at whatever the define was raised to.
+
+   Releasing and pressing again part way through does not restart
+   anything: the ramp continues from the speed it is at, and only the
+   remainder is dropped, because it belongs to the other direction.
+
+5.  Controls
+
+   +-----+-----------------------------------+
+   | Key | What it does                      |
+   +=====+===================================+
+   | c   | jump - tap for low, hold for high |
+   | z   | wheelie, while held               |
+   | x   | throttle, while held - see 4.5    |
+   +-----+-----------------------------------+
+
+   The host's own keys keep working: pause, single step, fast forward,
+   volume, mute and the section skip all drive the game through
+   Demo_Frame exactly as they drive the demo, because none of them
+   know what is being drawn. The last entry of the section table is
+   the game, so ] from the final hold lands here.
+
+6.  Open Questions
+
+   o  Nothing lands on anything. The bumps are scenery to be cleared,
+      and there is no scoring, no crash and no end.
+
+   o  The isometric wireframe world is the intended direction and
+      only the transform stands in the way - see section 1.
+
+   o  The rider's arms are solved but the handlebar grip is fixed, so
+      a hard landing does not move the shoulders.

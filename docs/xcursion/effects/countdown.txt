@@ -1,0 +1,262 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                   EXCURSION: THE 4-3-2-1 COUNTDOWN
+
+
+Abstract
+
+   Countdown_Render at XCURSION_U.EXE 1000:3873. Four glyphs, one per
+   burst, each exploded outward as additive particles in the palette's
+   fire band. 96 timer ticks per digit.
+
+   The glyphs are a 320x64 one-bit bitmap at 1000:895d and rendering it
+   is what settled which passage this is - the mechanism alone fits the
+   flame-shadowed text just as well.
+
+   Transcribed in sim/xcursion/parts.py; it is key 9 of sim/xcursion/demo.py and
+   the only part of the sim that is a scene rather than a debug view.
+
+Table of Contents
+
+   1. The mask, and the geometry that hides it
+   2. Spawn
+   3. Draw
+      3.1. The countdown owns its frame
+   4. Timing
+   5. Two Ghidra bounding errors around this function
+   6. What the reconstruction diverges on
+   7. Open questions
+
+1.  The mask, and the geometry that hides it
+
+   g_CountdownMask at 1000:895d is a 320 x 64 ONE-BIT BITMAP holding
+   the glyphs 4, 3, 2 and 1 at 64 pixels each [verified]. It is static
+   data in the image - unlike the palette and the plasma buffers, which
+   are built at runtime and so read as zeros in the dump.
+
+   The geometry is the one thing here that misleads. The spawn loop is
+   64 x 64, BP = 0x1000 at img 0x388e, so a 64-wide glyph looks like 8
+   bytes per row and 8 rows. It is not:
+
+   o Across 64 columns, CX wraps eight times, so img 0x389e increments
+     SI eight times - eight bytes.
+   o Then img 0x38dd adds 0x20 MORE at the end of every row.
+
+   So the row stride is 8 + 32 = 40 bytes, and 40 bytes is 320 bits.
+   The bitmap is 320 wide and the loop walks a 64-WIDE WINDOW down its
+   left edge. img 0x39c6 advances g_CountdownMask by 8 - one window
+   right - and img 0x39cc stops when it reaches 0x897d, giving exactly
+   four windows at x = 0, 64, 128 and 192. The last 64 columns of the
+   bitmap are never used.
+
+   READING IT AS FOUR 8-BYTE GLYPHS GIVES GARBAGE, which is how this
+   nearly got written down wrong: four 8-byte runs at 0x895d do look
+   like a plausible glyph table and decode into noise.
+
+   One more off-by-one: CX starts at 0, so the test at img 0x389a
+   passes and SI is incremented BEFORE the first BT. The first byte
+   read is g_CountdownMask + 1.
+
+       bit(window, col, row) =
+           mask[0x895d + window*8 + 1 + row*40 + (col >> 3)]
+           >> (col & 7) & 1
+
+   Particles per glyph, which is a cheap check on any transcription:
+
+   +--------+-------+-----------+
+   | Window | Glyph | Particles |
+   +========+=======+===========+
+   |      0 |   4   |      1619 |
+   |      1 |   3   |      2032 |
+   |      2 |   2   |      2321 |
+   |      3 |   1   |       989 |
+   +--------+-------+-----------+
+
+2.  Spawn
+
+   img 0x3887 - 0x38e5 [verified]. One particle per set bit, into an
+   11-byte record in segment 0x6a79, 0x1000 of them:
+
+   +--------+------+--------------------------------------------+
+   | Offset | Size | What                                       |
+   +========+======+============================================+
+   | +0     |   1  | life; 0xf8 on spawn, 0 means empty         |
+   | +1     |   2  | x, 1/16 pixel                              |
+   | +3     |   2  | y                                          |
+   | +5     |   2  | vx                                         |
+   | +7     |   2  | vy                                         |
+   | +9     |   2  | the offset last drawn to, for the restore  |
+   +--------+------+--------------------------------------------+
+
+       life = 0xf8
+       x    = ax + 0x0a00
+       y    = dx + 0x0640
+       vx   = sar(ax, 4)
+       vy   = sar(dx, 4)
+
+   ax and dx start at 0xfe00 and step by 0x10, so they run -512 to
+   +496 across the 64 columns and rows. THE VELOCITY IS THEREFORE
+   PROPORTIONAL TO THE OFFSET FROM CENTRE: the glyph explodes outward,
+   fastest at its edges, and that is the whole of the animation. There
+   is no per-particle randomness.
+
+3.  Draw
+
+   img 0x3925 - 0x39b1, once per particle per frame [verified].
+
+       restore the pixel at +9 from GS (0x5a79) - the clean background,
+         so particles leave NO trail
+       sample FS (0x2a79) at the position plus g_WarpOfsX, and again
+         plus g_WarpOfsY, and add those into the position
+       cull off screen, x against 0x140 and y against 0xc800
+       if pixel >= 0xc0 or pixel < 0x60:  pixel = 0x60
+       pixel += (g_FireHeat >> 1 + dh) >> 2
+       store the offset at +9
+       life -= 4; x += vx; y += vy
+
+   BOTH CULLS ARE `jae` AND SO BOTH ARE UNSIGNED, img 0x3957 and img
+   0x3971, on values that live in 16-bit registers. Sign-extending
+   them instead turns every row from 128 down into a negative and
+   culls it, which clips the digits along a straight line across the
+   middle of the screen and looks like a deliberate horizon.
+
+   NOTHING BOUNDS THE FINAL OFFSET. img 0x3975 adds the row to the
+   column with no check, so it reaches 64317 - past the 64000 a mode
+   13h screen shows, into the tail of the same 64 KB segment, where
+   the write is harmless. A reconstruction needs that tail to exist
+   or the particles that reach it run off the end of the buffer.
+
+   The two compares force every pixel into 96..191 and then heat is
+   ADDED, so accumulation climbs Pal_BuildMain's black-red-yellow-white
+   ramp - see subsystems/palette.txt section 2. That clamp is what
+   makes this fire rather than a particle system that happens to be
+   orange.
+
+   dh comes from the FS sample, so THE HEAT VARIES WITH THE TEXTURE and
+   the particles are also pushed sideways by g_WarpOfsX and
+   g_WarpOfsY - which Timer_IsrFrameUpdate animates, -1 and +0x101 per
+   tick. So the digits do not fly straight: they drift with the same
+   warp field the rest of the scene uses.
+
+3.1.  The countdown owns its frame
+
+   NOTHING ELSE MAY DRAW INTO THE FRAME WHILE THIS RUNS. The restore
+   at +9 puts back the pixel each particle last wrote, from the clean
+   copy in gs - so the frame persists between ticks by design, and
+   anything that writes into it every tick accumulates instead of
+   animating.
+
+   The caption fill is the one that bites: run it alongside the
+   particles and its mask fills in solid within a single threshold
+   sweep, because nothing ever clears what it wrote. FireText_Render
+   redraws the whole screen through Voxel_Render first, which is why
+   it can afford to; the countdown cannot.
+
+   So the landscape and the craft are prepared ONCE into the clean
+   copy and the digits are the only thing that moves. That is also
+   why the camera appears to stop - section 8.2 of ../effects/
+   voxel.txt has what actually stops it.
+
+4.  Timing
+
+   g_BurstTicks at 1000:999f is set to 0x60 by this function and
+   decremented by Timer_IsrFrameUpdate at img 0x0e73 [verified]. So a
+   digit lasts 96 ticks - about 0.96 s at the normal 100 Hz, and the
+   whole countdown about 3.8 s.
+
+   THIS IS THE ONE PART SO FAR THAT IS TIMER-DRIVEN RATHER THAN
+   MUSIC-DRIVEN. Everything in Demo_Timeline waits on g_MusicPos; this
+   counts ticks. It still stays with the music because the tick rate
+   and the module's step rate are the same clock - see
+   subsystems/music.txt section 5 - but the mechanism is different and
+   a reconstruction has to use ticks here, not order positions.
+
+   Life 0xf8 decremented by 4 gives 62 steps of the particle loop.
+
+   WHETHER THAT OUTLASTS THE BURST DEPENDS ON THE TICK RATE, which is
+   not established for this mode. Timer_Isr runs TWICE per displayed
+   frame where the opening's camera integrator is concerned -
+   ../effects/voxel.txt section 8.2, measured - and at that rate 96
+   ticks is 48 frames, which a 62-step particle outlives. At one tick
+   a frame it is 96 frames and the particle dies first, which is the
+   reading that makes the glyph vanish before the next spawns.
+
+   src/ decrements the burst per tick, since img 0x0e73 is in the tick
+   handler. Which cadence mode 1 actually runs at wants measuring.
+
+5.  Two Ghidra bounding errors around this function
+
+   Both are silent and both change what a listing appears to say.
+
+   o **The particle-death path is at img 0x0a9f, which Ghidra has
+     inside Demo_Shutdown.** Demo_Shutdown really ends at img 0x0a9e
+     with an INT 21h AX=4C00 that never returns; the bytes after it
+     clear a life byte, restore a pixel from GS and jump back to
+     img 0x39b1. It is a cold path tucked in after an exit. Reading it
+     as shutdown code makes no sense of either function.
+
+   o **Ghidra shows no writer for g_BurstTicks.** The `dec word ptr
+     cs:[0x999f]` at img 0x0e73 is real and reached from the timer
+     interrupt, but Ghidra has not attributed that block to any
+     function - `get_function_by_address` on it returns nothing - so it
+     does not appear in an xref list. The same block also animates
+     g_WarpOfsX and g_WarpOfsY, so anything looking for what moves
+     those will miss them the same way.
+
+   Timer_Isr's real extent is larger than the body Ghidra gives it, and
+   per-frame state updates live in the part it has not claimed.
+
+6.  What the reconstruction diverges on
+
+   sim/xcursion/parts.py's countdown_step does NOT do the FS sampling of
+   section 3, because segment 0x2a79's contents at this point in the
+   demo have not been traced. The consequences, stated rather than
+   hidden:
+
+   o the particles fly straight instead of drifting with the warp
+   o the heat added is constant - the texture = 0 case - so a pixel
+     reaches 0x7f and no further unless two particles land on it
+
+   Everything else is transcribed: the mask and its geometry, the spawn
+   positions and velocities, the 11-byte record, the clamp, the life
+   decrement, the background restore.
+
+7.  Open questions
+
+   o **What fills segment 0x2a79 before this runs.** It is
+     Plasma_Generate's output somewhere, but which generation and
+     which band transform is not established, and section 6 depends on
+     it.
+
+   o **Why 0x1000 particle slots** when the largest glyph needs 2321.
+     Either the slot array is shared with something else or the figure
+     is just generous.
+
+   o **g_FireHeat is set to 0xff and never changed** by this function.
+     If something else modulates it, the flame would pulse; nothing
+     found yet does.
+
+   THE PARTICLES ARE WARPED, AND THAT WAS MISSING FROM THE FIRST
+   READING [verified]. img 0x3941 and 0x395b sample the field at
+   segment 0x2a79 - the plasma that img 0x00a4 generates before the
+   countdown - and displace the particle by it:
+
+       bx = (x >> 4) + ((y & 0xfff0) << 4)
+       bx += g_WarpOfsX
+       x += (field[bx] >> 3) - 0x10            +/- 16 px
+       bx += g_WarpOfsY                        CUMULATIVE, not a
+                                               second independent
+                                               offset
+       y += ((field[bx] & 0xf8) << 5) - 0x1000
+
+   Measured on the transcription that is 0 to 8 pixels of x and 0 to 8
+   screen rows of y, varying per particle and drifting as the mode 1
+   handler advances both offsets - so THE DOTS WAVE as well as expand,
+   by the same mechanism as Flag_Render's panel.
+
+   THE SHIFTED AX IS REUSED. img 0x3937 masks y with 0xfff0 and img
+   0x393c shifts it left 4; THAT SAME SHIFTED VALUE is what img 0x3969
+   adds the y displacement to. Shifting it only inside the bx
+   computation puts the screen y out by a factor of sixteen, which
+   looks like the particles leaving from far above the glyph.

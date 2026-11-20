@@ -1,0 +1,14 @@
+{
+  "dump_bytes": 486912,
+  "load_seg": 4096,
+  "orig_cs": 4128,
+  "orig_ip": 0,
+  "orig_sp": 500,
+  "orig_ss": 4096,
+  "packer": "PKLITE 1.15",
+  "rel_cs": 32,
+  "rel_ss": 0,
+  "stub_cs": 34528,
+  "write_hi": 486912,
+  "write_lo": 0
+}

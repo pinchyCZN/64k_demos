@@ -1,0 +1,194 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                        THE DEBUG AGENT AND ITS MCP
+
+
+Abstract
+
+   A crude debugger embedded in the reconstruction. One line protocol
+   on a named pipe lets a client step the demo a tick at a time, read
+   or write a named variable, hook a function without stopping it,
+   and write the frame out as a PPM. An MCP server presents it as
+   tools, so an effect can be driven and looked at without a window.
+
+   IT IS OURS IN FULL - nothing in it is transcribed from any demo,
+   so the evidence tags of README.txt section 2 do not apply. It is
+   also not about one demo: the agent serves whichever of them links
+   it, and LITHIUM is simply the first.
+
+   Debug|Win32 only, deliberately: the map file exists in no other
+   configuration and _penter is 32-bit assembly.
+
+Table of Contents
+
+   1. The pieces
+   2. Running it
+   3. The map file, and what the agent knows
+   4. The build, and the one file that must not be instrumented
+   5. What a demo has to provide
+      5.1. Where a struct's members sit
+   6. Where this differs from a window
+   7. Open questions
+
+1.  The pieces
+
+   +------------------------------+----------------------------------+
+   | src/agent.c                  | the agent. NEVER COMPILE WITH    |
+   |                              | /Gh - see section 4              |
+   | src/lithium/lithium_layout.c | -offsets, section 5.1            |
+   | src/agent.h                  | the host boundary                |
+   | src/agent_host.h             | what a demo adds to be           |
+   |                              | debuggable                       |
+   | tools/agent/agent.py         | the transport, and a CLI         |
+   | tools/agent/mcp_server.py    | the MCP server, 21 tools         |
+   +------------------------------+----------------------------------+
+
+   The pipe is \\.\pipe\64k_demo_dbg and the MCP server is registered
+   in .mcp.json as 64k-demo-dbg. ONE HOST AT A TIME: the name carries
+   no demo in it, so a second host finds the pipe taken and says so
+   rather than opening a second one nobody is reading.
+
+2.  Running it
+
+       build\Win32\Debug\lithium_ppm.exe -agent -o build/ppm
+
+   The host then renders nothing until it is told to. -agent REPLACES
+   the dump loop rather than running beside it, because the agent
+   owns the clock - src/host.h, one of only two files that loop.
+
+   From a shell:
+
+       py -3.10 tools/agent/agent.py STATUS
+       py -3.10 tools/agent/agent.py STEP n=3
+       py -3.10 tools/agent/agent.py SYM name=g_tick
+       py -3.10 tools/agent/agent.py GET_MEM sym=g_tick len=4
+       py -3.10 tools/agent/agent.py DUMP path=f.ppm
+
+   KEY=VALUE ARGUMENTS ARE SEPARATE ARGV ENTRIES, not one quoted
+   string. The CLI joins argv itself, so quoting the whole command
+   hands the verb an argument it cannot parse and the reply is
+   ERR_BAD_ARG for a line that looks correct.
+
+   THE CLOCK AND THE PIXELS ARE ONE APART and both are reported.
+   Demo_Frame renders and then advances, so after STEP n=3 the reply
+   is tick=3 shown=2 - the frame on screen is the one tick 2 drew.
+
+3.  The map file, and what the agent knows
+
+   Symbols come from the linker's .map file, found as a sibling of
+   the running executable, so nothing has to be configured. For
+   lithium_ppm that is 466 symbols, ours and the CRT's together.
+
+   A name is not unique - the map is per object file - so a symbol
+   is name#object and SYM answers ERR_AMBIGUOUS with the candidates
+   when a bare name matches more than one.
+
+   STATUS reports mapstale. A map older than the executable is the
+   one way this system lies, because every address it holds is then
+   for different code.
+
+4.  The build, and the one file that must not be instrumented
+
+   Two things are turned on for Debug|Win32 only:
+
+   +------------------+-----------------------------------------------+
+   | GenerateMapFile  | on the Link group - section 3                 |
+   | /Gh /GH          | per source file, on the demo's own sources    |
+   +------------------+-----------------------------------------------+
+
+   /Gh and /GH make the compiler emit a call to _penter on entry to
+   every function and _pexit on every return. That is how a hook
+   catches a function it was never built to catch.
+
+   NEVER /Gh ON agent.c. _penter lives there, so an instrumented
+   _penter would call itself and recurse until the stack is gone.
+   The project file says so at the ClCompile entry, and that comment
+   is the only thing standing between the next person and a stack
+   overflow with no stack left to report it.
+
+   /Gh IS PER FILE, NOT PER PROJECT, which is what makes this safe to
+   extend: a new source gets instrumented by being given the option,
+   and a file that must not be keeps it by saying nothing.
+
+5.  What a demo has to provide
+
+   src/host.h is the contract every demo already answers. On top of
+   it the agent needs six functions, src/agent_host.h:
+
+       Dbg_TickCount   Dbg_PartIndex   Dbg_PartCount
+       Dbg_PartLabel   Dbg_GotoPart    Dbg_StepPart
+
+   A seventh, Dbg_PrintLayout, answers -offsets rather than the pipe -
+   section 5.1.
+
+   THE AGENT DOES NOT KNOW WHAT A PART IS beyond an index and a
+   label. That is what lets one agent serve three demos whose part
+   structures have nothing in common - a scene number in XCURSION, a
+   music sync in LITHIUM, a keyframe range in UKKO.
+
+   A demo with no parts yet answers count=1 and a label that says so.
+
+   DBG_GOTOPART REPLAYS WHERE THE SCENE KEY JUMPS, and the difference
+   is deliberate. Lithium's [ and ] land on a part by placing the
+   music clock and entering it, which is immediate but reaches a
+   state no playthrough would have - the RNG stream is this jump's.
+   Dbg_GotoPart runs the module into the part instead, so what it
+   reaches is what a real run reaches, and main_ppm.c -scene takes
+   that one. A frame to be compared against the emulator has to come
+   through Dbg_GotoPart.
+
+   5.1.  Where a struct's members sit
+
+      THE MAP FILE DOES NOT KNOW. It carries the address of a symbol
+      and nothing about the layout inside it, and member offsets are
+      a compiler's business - so the demo is asked to print its own:
+
+          build\Win32\Debug\lithium_ppm.exe -offsets
+
+      It runs after Demo_Init and exits, so what it prints describes
+      the binary the agent attaches to rather than a header that may
+      have moved on. Debug|Win32 only, like the rest of the agent.
+
+      WORKING ONE OUT BY HAND IS WHAT THIS REPLACES. A sum that put
+      LithScene.attr 64 bytes low read as real data rather than as an
+      error, because the bytes on either side of a member are
+      themselves plausible: sixteen faces with an attribute of zero
+      that were not there. The offset is printed in HEX as well as
+      decimal because dbg_dump_mem takes hex and that is where the
+      sum went wrong.
+
+      IT LISTS WHAT WE READ AND NOTHING ELSE - LithScene, LithProj
+      and LithSlot today. A struct nobody dumps has no row, and
+      adding one is a line.
+
+6.  Where this differs from a window
+
+   THE FRAME IS 8-BIT INDEXED, as mode 13h leaves it, so DUMP
+   resolves it through the demo's own palette on the way out - the
+   same 6-bit to 8-bit widening src/main_ppm.c does, where 0x3f
+   becomes 255 and not 252.
+
+   SET_RES ONLY EVER REPORTS. Mode 13h is 320x200 and no demo of
+   ours can be asked for another size, so the verb answers with the
+   fixed one rather than pretending to have changed it.
+
+   AUTO-ADVANCE IS THE AGENT'S OWN FLAG. None of our demos has the
+   idea of advancing itself between parts; a demo runs or it does
+   not.
+
+7.  Open questions
+
+   o  Lithium has one part and it is not a part of the demo. The six
+      Dbg_ functions answer honestly rather than inventing a
+      structure, and they grow into the scene table as the parts
+      land.
+
+   o  XCURSION and UKKO do not link the agent yet. Nothing stops
+      them - the work is the six functions of section 5 and the
+      project settings of section 4.
+
+   o  The hook capture grammar is ported whole and only the simplest
+      of it has been exercised here: enter=caller on a per-frame
+      function. The argument, memory and delta forms are untested
+      against our demos.

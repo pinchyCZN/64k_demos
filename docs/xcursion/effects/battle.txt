@@ -1,0 +1,621 @@
+PCDEMOS 64k                                            Analysis Note
+
+
+              EXCURSION: THE BATTLE, THE SHOTS, THE FLAG
+
+
+Abstract
+
+   Battle_Run at 1000:264b and the four routines it drives: two craft
+   with independent state, eight 3D projectiles, and a blur-and-decay
+   glow in the fire ramp.
+
+   The projectiles answer the laser question: THEY ARE MESHES, out of
+   an eight-slot table, with the weapon model chosen by the music
+   position, and INSTRUMENT 9 IN THE MODULE PULLS THE TRIGGER -
+   section 2.1. The flag answers the other: it is MODEL 0x5be7, a pole
+   and a banner, drawn in Car_Run, and ITS GEOMETRY IS STATIC - it
+   does not wave.
+
+   Six models exist in the image, not four. Section 5 lists them all,
+   and section 8 has the three flight models that move the two craft.
+
+Table of Contents
+
+   1. Battle_Run
+      1.1. The part chain, from sync 0x15
+   2. The shots
+      2.1. Where they come from
+      2.2. How they fly, and the hit test
+      2.3. The fade, which is the flash
+      2.4. Where the craft sits on screen
+   3. The glow
+   4. The flag
+   5. Every model in the image
+   6. The transcription
+   7. Open questions
+   8. The flight models - modes 9, 0xa and 0xb
+
+1.  Battle_Run
+
+   Three parts call it - img 0x05c5 at sync 0x19, img 0x064e at sync
+   0x1b, img 0x06f2 at sync 0x21 [verified]. Per frame:
+
+       img 264b    clear g_WorkSeg, 0x3e80 dwords
+       img 265b    Points_Render - the stars
+                   ... the scene, order below ...
+       img 268e    Vga_Present
+       img 2691    Input_Poll
+                   loop until g_MusicPos reaches the target
+
+   IT DOES NOT WAIT FOR A TICK. img 0x2691 is Input_Poll at
+   1000:0ace, not Demo_WaitTick at 1000:0abc, so this part renders as
+   fast as the machine allows while the flight models stay on the
+   timer. The moire does wait; this does not.
+
+   THE DRAW ORDER FLIPS ON g_AnimMode, img 0x265e, and the glow moves
+   with it [verified]:
+
+   +---------------------------+---------------------------+
+   | mode 9 and 0xa            | mode 0xb                  |
+   +===========================+===========================+
+   | Battle_DrawCraftA         | Battle_DrawCraftB         |
+   | Glow_Render BX=0x2d60,    | Glow_Render BX=0x9c,      |
+   |   only once g_MusicPos    |   unconditionally         |
+   |   reaches 0x1a            |                           |
+   | Shots_Draw                | Shots_Draw                |
+   | Battle_DrawCraftB         | Battle_DrawCraftA         |
+   +---------------------------+---------------------------+
+
+   So in mode 0xb craft A is drawn last and is therefore in front, and
+   the glow box moves from x=96 y=36 to x=156 y=0. BX is a flat offset
+   into the 320-wide buffer, not a coordinate pair.
+
+   THE ORDER FLIP IS A PAINTER'S-ALGORITHM DECISION THE FLIGHT MODEL
+   FORCES, not a style choice. In modes 9 and 0xa craft B chases A from
+   behind, so A is farther and goes down first; in mode 0xb B is placed
+   one forward vector AHEAD of A, so B is farther and goes down first.
+   Section 8.
+
+   The two craft have SEPARATE STATE BLOCKS AND SEPARATE VERTEX
+   SEGMENTS, which is what lets both be on screen at once [verified]:
+
+   +---------------------+---------+----------+--------------+---------+
+   | Routine             | Model   | Verts to | Position     | Angles  |
+   +=====================+=========+==========+==============+=========+
+   | Battle_DrawCraftA   | 0x585f  | 0x3a79   | g_Obj1X/Y/Z  | g_Obj1* |
+   | 1000:26a0           | 34v 45f |          |              |         |
+   +---------------------+---------+----------+--------------+---------+
+   | Battle_DrawCraftB   | 0x572f  | 0x6a79   | g_Obj2X/Y/Z  | g_Obj2* |
+   | 1000:26e8           | 17v 25f |          |              |         |
+   +---------------------+---------+----------+--------------+---------+
+
+   Craft B CARRIES THE ONLY TRUE CULL IN THE OBJECT PIPELINE: img
+   0x2701 returns without drawing when its z is negative. Everywhere
+   else Mesh_TransformVerts merely clamps a vertex to the near plane,
+   so a craft behind the camera would smear rather than vanish.
+
+   Battle_RunNoShots at 1000:2efa is the same scene with no Shots_Draw
+   and one craft - sync 0x23 and 0x25.
+
+   g_Obj2Pitch, g_Obj2Yaw and g_Obj2Roll are SHARED with the car - the
+   mode 0x18 handler steers the car through the same triple. See
+   effects/car.txt section 6.
+
+   Segment 0x6a79 is shared with Planet_BuildMap's sphere table. That
+   is why Planet_BuildMap is called twice, img 0x02d2 and img 0x4e34,
+   instead of once at startup: craft B's transform destroys the table.
+   See effects/planet.txt.
+
+1.1.  The part chain, from sync 0x15
+
+   Six parts between the moire and the aftermath [verified]. The
+   first two are not Battle_Run at all - they are Planet_Render with
+   the ball suppressed, one craft against the stars:
+
+   +-------+------+------+--------------------+------------------------+
+   | At img| Mode | Sync | Runner             | What it is             |
+   +=======+======+======+====================+========================+
+   | 045d  |  8   | 0x15 | Planet_Render      | craft A, opening WHITE |
+   | 04e0  |  8   | 0x16 | Planet_Render      | cut to craft B, far    |
+   |       |      |      |                    | out to one side        |
+   | 0548  |  9   | 0x19 | Battle_Run         | the approach           |
+   | 05cb  | 0xa  | 0x1b | Battle_Run         | the Lissajous pass     |
+   | 0654  | 0xb  | 0x21 | Battle_Run         | locked formation, and  |
+   |       |      |      |                    | A does the shooting    |
+   | 06f5  | 0xc  | 0x23 | Battle_RunNoShots  | the aftermath          |
+   | 0750  | 0xd  | 0x25 | Battle_RunNoShots  | THE WARP OUT - 1.2     |
+   +-------+------+------+--------------------+------------------------+
+
+   EACH PART ENDS ON ITS OWN TARGET and they are not evenly spaced -
+   0x15, 0x16, 0x19, 0x1b, 0x21, 0x23. Reading the sync column one row
+   down puts modes 0xa and 0xb a whole pattern late, which leaves the
+   approach running through the pass and the pass through the
+   formation.
+
+   Battle_RunNoShots at img 0x2efa is Battle_Run with Shots_Draw gone,
+   one craft out of the shared object slot, and THE GLOW DRAWN
+   UNCONDITIONALLY rather than gated on the order.
+
+   Verified against the running demo [observed]: at order 0x1b and
+   again at 0x1c, all six of craft A's and craft B's coordinates match
+   src/ byte for byte - mode 0xb recomputes both from the forward
+   vector every tick, so nothing accumulates. At order 0x1a, where
+   mode 0xa integrates instead, A matches exactly and B's Lissajous
+   pair is within three ticks of phase.
+
+   THE FIRST TWO OPEN AT THE FADE'S CEILING. img 0x04c9 and img 0x04e0
+   set g_FadeLevel to 0x3d80, a bias of 0x3d on every DAC component,
+   so the screen is white; mode 8 then walks it down by 0x60 a tick.
+   The moire before them ends by washing out to white at order 0x13 -
+   effects/moire.txt section 1.1 - so the two meet with no cut.
+
+   img 0x0474 PARSES CRAFT B'S MODEL and img 0x0481 craft A's. That is
+   the only place either is read.
+
+   Only the last two Battle_Run parts clear anything: img 0x05d5 and
+   img 0x0676 call Shots_ClearGlowField, img 0x05d8 and img 0x0654
+   call Shots_Clear. The sync-0x19 part clears neither, which is why
+   its first glow frames blur the colour map's leftovers - section 3.
+
+   The two craft start [verified]:
+
+   +------+----------------------------+-------------------------+
+   | Part | Craft A, g_Obj1            | Craft B, g_Obj2         |
+   +======+============================+=========================+
+   | 0548 | 0, 0, 0x6000               | 0, 0, -0x14000          |
+   |      | ang 0x1c4, 0x100, 0x7b     | ang 0, 0, 0             |
+   +------+----------------------------+-------------------------+
+   | 05cb | 0, 0, 0x10000              | 0, 0, 0x6000            |
+   |      | ang 0, 0x400, 0            | ang 0, 0x400, 0x400     |
+   +------+----------------------------+-------------------------+
+   | 0654 | -0x9000, 0x8000, 0x10000   | 0, 0x3000, 0xa000       |
+   |      | ang 0x100, 0x300, 0        | ang 0xff60, 0x300, 0x400|
+   +------+----------------------------+-------------------------+
+
+1.2.  The warp out
+
+   img 0x0750, mode 0xd at img 0x147e, and it ends the scene
+   [verified].
+
+   THE STRETCH IS g_MeshZScale AND NOTHING ELSE. Mesh_TransformVerts
+   scales every vertex's z by it at img 0x498f before the rotate, so a
+   growing scale draws the craft longer and longer along its own axis.
+   The warp streak IS the model, not a trail behind it. 0x100 is the
+   neutral value - it matches the << 3 that x and y get - and the part
+   sets exactly that on entry.
+
+   AND THE SAME SCALE IS THE SPEED. img 0x1497 rotates
+   (0, 0, -(zscale << 4)) and the result drives both the star camera
+   at img 0x14b3 and the craft at img 0x1507, so the stars streak for
+   the same reason the ship stretches. One variable does both.
+
+   The growth COMPOUNDS, img 0x1521: plus 4, then plus a sixteenth of
+   the new value, every tick once the row counter passes 0x20. Before
+   that it decays by a thirty-second. Past z 0x20000 a third rule
+   damps it by an eighth.
+
+   Then the ending, img 0x1573:
+
+       g_ObjTransZ = g_ObjTransX = 0xfffd8000
+       g_SparkLife = 0x80 ; g_SparkShift = 8
+       g_FadeLevel = 0x4000 and Pal_Fade
+       Glow_Burst
+
+   0xfffd8000 IS A PARKED SENTINEL, NOT A POSITION. img 0x14ed tests
+   it and skips the entire motion block, so once the craft warps it
+   stays gone. Reading it as somewhere the ship flew to makes the
+   ending look like a craft falling off the far plane instead of
+   vanishing.
+
+   What is left is the burst, and it is BLUE because the part takes
+   its own palette: Pal_BuildWarp at 1000:3c1d, seven bands with
+   Glow_Render's 0x60..0xbf window landing on black-blue-cyan-white
+   where Pal_BuildMain puts a fire ramp. Same renderer, different
+   colour.
+
+   THE BURST ALSO CHANGES CHARACTER PERMANENTLY. g_SparkLife and
+   g_SparkShift are 0x20 and 6 in the image and this is the only place
+   that writes them - to 0x80 and 8, a longer-lived and slower burst -
+   and nothing puts them back.
+
+2.  The shots
+
+   Shots_Draw at 1000:27ad [verified]. Eight slots, each a full 3D
+   object through Mesh_Draw.
+
+   THE SLOT TABLE IS AT SEGMENT 0x4a79 OFFSET 0x1770, 8 slots of 0x12
+   bytes, img 0x27d0 to 0x2815:
+
+       +0     dword   x       -> g_ObjTransX
+       +4     dword   y       -> g_ObjTransY
+       +8     dword   z       -> g_ObjTransZ
+       +0xc   word    pitch   -> g_ObjPitch
+       +0xe   word    yaw     -> g_ObjYaw
+       +0x10  word    roll    -> g_ObjRoll
+
+   A SLOT WITH X == 0 IS INACTIVE, img 0x27d3, tested as a dword. The
+   free-slot marker is a position, not a flag byte, so a shot can
+   never sit exactly on the world x origin.
+
+   The table ends at 0x1800, which is exactly where
+   Shots_ClearGlowField begins. The boundary is deliberate.
+
+   THE WEAPON CHANGES WITH THE MUSIC, img 0x27b4 [verified]:
+
+   +------------------+--------+-------------------------------------+
+   | g_MusicPos       | Model  | What it is                          |
+   +==================+========+=====================================+
+   | below 0x1c       | 0x5b81 | 6 verts, 8 faces. A double cone     |
+   |                  |        | 47 long and 4 across - a bolt.      |
+   |                  |        | EVERY FACE ATTRIBUTE 0x60, so it    |
+   |                  |        | is drawn in the fire ramp           |
+   +------------------+--------+-------------------------------------+
+   | 0x1c and above   | 0x5a8a | 14 verts, 20 faces. A pointed nose  |
+   |                  |        | at z=-34, a body, swept wings at    |
+   |                  |        | x +/-8 and tail fins. Attributes    |
+   |                  |        | 0xc0 (greyscale) and 0x80 (red to   |
+   |                  |        | yellow) - a solid-bodied weapon     |
+   +------------------+--------+-------------------------------------+
+
+2.1.  Where they come from
+
+   THE TAILS SPAWN THEM AND THE MUSIC TRIGGERS THEM [verified].
+
+   The sequencer's row decoder raises two flags off instrument
+   numbers, img 0x0d03 and img 0x0d0e:
+
+       instrument 0x10 -> g_FlashFlag  (img 0xa88d), the plasma's
+                          white pulse - effects/warp.txt section 3
+       instrument 0x09 -> g_FireFlag   (img 0xa88c), THE GUN
+
+   So the shooting is on the beat, by the same mechanism as the
+   plasma's flash and not by a timer.
+
+   WHICH CRAFT FIRES DEPENDS ON THE PART. The modes 9 and 0xa tail at
+   img 0x1dbe spawns from g_Obj2 - CRAFT B - and flashes the screen by
+   0x600. The mode 0xb tail at img 0x1e3f spawns from g_Obj1 - CRAFT A
+   - with ITS ROLL FORCED TO ZERO, img 0x1e70, and flashes by 0x300.
+
+   Either way the slot is a round robin of eight through g_ShotNext at
+   img 0x9923, and the shot carries the firing craft's own position
+   and attitude, so it leaves along the nose.
+
+   AND THE TRIGGER CHANGES AT ORDER 0x1c, img 0x1e25. At or above it
+   the mode 0xb tail reads g_NewPatternFlag at img 0xa88e instead,
+   which Music_NextPattern raises once per pattern at img 0x2234 - so
+   A's rate drops from one a note to one a pattern and the shooting
+   thins out rather than stopping. Both flags are cleared on a spawn,
+   so a note left pending across the switchover cannot fire twice.
+
+2.2.  How they fly, and the hit test
+
+   img 0x1e9b, run by both tails every tick [verified]:
+
+       rotate (0, 0, -0x20) by the slot's own angles and add it
+       UNSHIFTED - Vec_Rotate3 returns x64, so the step is 64 times
+       what the literal suggests
+       roll += 0xb                             img 0x1ed9, a spin
+       kill if x or y leaves +/-0xa0000
+       kill if z > 0x2e000
+
+   THE Z BOUND IS UNSIGNED - img 0x1f12 is `ja` - so a shot whose z
+   goes negative is killed by that same test instead of flying on
+   behind the camera. The x and y bounds are signed.
+
+   IN MODE 0xb ONLY there is a hit test, img 0x1f14 onward: a box
+   0x1000 on a side centred on craft B, lo = B - 0x800 and hi = lo +
+   0x1000. It is AXIS-ALIGNED IN WORLD SPACE and ignores B's
+   attitude - a box around a point and nothing more. A hit calls
+   Glow_Burst, adds 0x600 to the fade and kills the shot; img 0x1f85
+   is both that kill and the out-of-bounds one.
+
+   So the only part where a shot can actually strike is the one where
+   craft A is shooting.
+
+2.3.  The fade, which is the flash
+
+   THE SCREEN PULSES BECAUSE THE SHOT STEP BLEEDS THE FADE OFF, img
+   0x1f94, and that is the last thing both tails do [verified]:
+
+       if (signed) g_FadeLevel <= 0:  done
+       g_FadeLevel -= 0x60, then Pal_Fade
+
+   Every spawn throws the level UP - 0x600 from the modes 9/0xa tail,
+   0x300 from mode 0xb's, another 0x600 on a hit - and this takes it
+   back down 0x60 a tick. So a shot is a bright flash that falls off
+   over about ten ticks, and between shots the screen sits near its
+   own level.
+
+   WITHOUT IT THE LEVEL ONLY EVER CLIMBS. The screen then settles at a
+   pale grey and never pulses, and the glow's box reads as a coloured
+   square parked on screen instead of a muzzle flash - which is the
+   whole visual signature of the scene lost to one missing
+   subtraction.
+
+   The test is JLE on a WORD, so it stops at zero from either side.
+   Mode 8's own copy at img 0x124e is JZ and stops only on exactly
+   zero, and mode 0xc's at img 0x1468 is JZ with a step of 0x30.
+
+   Measured against the running demo at four points [observed]:
+
+   +-------+-------+------------+------------+
+   | Order | Mode  | g_FadeLevel| src/       |
+   +=======+=======+============+============+
+   | 0x1a  |  0xa  |   0x1560   |   0x16e0   |
+   | 0x1b  |  0xb  |   0x02a0   |   0x0240   |
+   | 0x1c  |  0xb  |   0x17a0   |   0x1740   |
+   | 0x22  |  0xc  |   0x0ff0   |   0x0fc0   |
+   +-------+-------+------------+------------+
+
+   The 0x2a0 against 0x17a0 one order apart is the pulse itself: low
+   between shots, high on one. Each row is within one to four ticks of
+   its step.
+
+   0x5b81's geometry is the decisive evidence that these are the
+   lasers. Vertex 1 is the origin, vertex 6 is at z=-47, and vertices
+   2 to 5 are a diamond of radius 2 at z=-25; the eight faces are four
+   triangles to each apex. A 47-by-4 spindle rendered in a black-to-
+   red-to-yellow ramp is a glowing bolt and nothing else.
+
+2.4.  Where the craft sits on screen
+
+   Mesh_TransformVerts projects to
+
+       sx = ((x << 4) / (z >> 3)) + 0xa0
+       sy = ((y << 4) / (z >> 3)) + 0x48 + g_SkyBias
+
+   and 0x48 is 72, not 100. THE MESH IS ONLY CENTRED WHEN g_SkyBias IS
+   0x1c, which is what img 0x0292 - the planet part - sets. That is
+   the LAST write to it in Demo_Entry: the only other writers anywhere
+   are img 0x52ef in Demo_Timeline and Voxel_LatchCamera, which no
+   part after the landscape calls. So 0x1c stands for the planet, the
+   star cut, the whole battle and the warp out [verified], and read
+   live at order 0x16 it is 0x001c [observed].
+
+   Points_Render uses a flat + 0x64 instead, img 0x3241, so THE STARS
+   ARE CENTRED WHATEVER g_SkyBias IS. A craft 28 pixels above a
+   centred starfield is the signature of having zeroed it somewhere.
+
+   And because Glow_Render's box is a fixed screen offset whose centre
+   is the screen's - 0x2d60 is row 36 column 96, so rows 36..163 of
+   128 - a craft displaced that way puts every muzzle flash and every
+   hit splat on empty space. The two symptoms have one cause.
+
+3.  The glow
+
+   Glow_Render at 1000:2736 [verified]. A 128x128 field at segment
+   0x4a79, blurred and decayed, drawn into the fire band.
+
+   Per cell, img 0x2751 to 0x2787:
+
+       AX = [SI-1] + [SI-0x80] + [SI+1] + [SI+0x80]
+            with ADC into AH, so the 10-bit sum does not wrap
+       AX >>= 2                        the average - a box blur
+       DH = AL
+       if AX != 0:
+           DH--                        THE DECAY
+           AL = (AX >> 1) + 0x60       into the fire ramp at 96
+           clamp to 0xbf               191, the top of the ramp
+           write the pixel
+       [DI] = DH                       to the OTHER buffer
+
+   THE DECAY IS WHAT MAKES IT DIE. A box blur conserves its total and
+   would settle into a steady glow; the DEC at img 0x2771 takes one
+   off every non-zero cell per frame.
+
+IT IS NOT DOUBLE-BUFFERED, and this is the trap in the routine.
+   img 0x2791 loads g_GlowDst into AX and XCHGs it with g_GlowSrc, so
+   g_GlowSrc takes the destination's value and THE XCHG'S OTHER HALF
+   IS DROPPED IN AX. g_GlowDst at img 0x98b1 has no writer anywhere in
+   the image - its only two references are the reads here - so from
+   the SECOND call on both point at 0x1880 and the blur reads its own
+   output: the taps behind the cursor are this frame's values and the
+   ones ahead are last frame's, which drags the glow along the scan.
+   Treating the pair as a working double buffer gives a symmetric blob
+   and the wrong effect.
+
+   THE BUFFERS LIE INSIDE THE VOXEL'S COLOUR MAP. Segment 0x4a79 is
+   the 256x256 colour map Terrain_BuildShade fills - effects/voxel.txt
+   section 2 - and 0x1880 and 0x5900 are offsets into it. Nothing
+   clears them before the sync-0x19 part reaches order 0x1a, so the
+   first glow frames blur what the landscape left there and a faint
+   square fades out over about a second. Measured at the moire, one
+   part earlier: the bytes at 0x1880 run 0x0e to 0x31 [observed], and
+   src/ reproduces them byte for byte from the generator chain plus
+   Terrain_TintWater.
+
+   Shots_ClearGlowField at 1000:279b clears 0x20a8 dwords from 0x1800
+   - 0x82a0 bytes, both 0x4000 buffers AND the 32-slot particle table,
+   ending exactly on the table's last byte.
+
+   The row stride is assembled as 0x80 columns then BX += 0xc0, which
+   is the 320 screen stride, img 0x2789.
+
+4.  The flag
+
+   MODEL 0x5be7, drawn by Car_Run at img 0x248a - the TINY flag in the
+   car scene [observed].
+
+   THERE ARE TWO FLAGS IN THE DEMO and only this one is a mesh. The
+   big waving flag with VISTA on it, one scene earlier, is
+   Flag_Render at 1000:2504 displacing a text panel - effects/flag.txt
+   - and is unrelated to this model. Both readings stand; see
+   effects/scenes.txt section 3.4.
+
+   11 verts, 6 faces, all quads [verified]:
+
+   +---------+-------+------------------------------------------------+
+   | Faces   | Attr  | What                                           |
+   +=========+=======+================================================+
+   | 0 to 3  | 0x60  | a square column rotated 45 degrees, 21 tall    |
+   |         |       | and 2 across - THE POLE. Verts 1 to 8          |
+   +---------+-------+------------------------------------------------+
+   | 4 and 5 | 0x20  | one quad and its reverse winding - the two     |
+   |         |       | sides of THE BANNER. Verts 9, 10, 11 and 4:    |
+   |         |       | out to x=9, between y=-9 and y=-16             |
+   +---------+-------+------------------------------------------------+
+
+   Attribute 0x60 puts the pole in the fire ramp at 96, so it reads
+   dark red to yellow; 0x20 puts the banner in the blue band at 32.
+   See subsystems/palette.txt section 2.
+
+   IT DOES NOT WAVE, and this is the one claim worth being careful
+   about - the waving one is a different scene and a different
+   mechanism, described at the top of this section. A waving flag
+   needs the vertices deformed per frame, and
+   NOTHING IN THE IMAGE WRITES TO THE MODEL DATA REGION - checked by
+   scanning every cs-relative store in the first 0xb000 bytes. The
+   model's only motion is the camera's, and its placement is fixed:
+   img 0x2469 puts it at the craft's own target less 0xb800 in z and
+   0x5200 in x, with pitch 0, YAW FIXED AT 0x200 and roll 0.
+
+   Car_Run draws THREE objects per frame, each skipped when
+   Mesh_SetupTransform returns a camera-space z of 0x28000 or more, so
+   each pops in as the camera closes:
+
+       1.  0x585f  the craft, from g_9484/88/8c and g_9943/45/47
+       2.  0x5be7  the flag, at the fixed offset above
+       3.  0x94f4  the car, from g_9478/7c/80 and g_995b/5d/5f.
+                   g_947c is the ground height Terrain_HeightAt
+                   returned at img 0x51c1 - which is what puts the car
+                   ON the terrain rather than through it
+
+5.  Every model in the image
+
+   Found by scanning every store to g_MeshFaces at cs:0x98ad
+   [verified]. SIX, where effects/timeline.txt had four:
+
+   +--------+------+------+----------------------------------------+
+   | Base   | Verts| Faces| What                                   |
+   +========+======+======+========================================+
+   | 0x572f |   17 |   25 | craft B of the battle                  |
+   +--------+------+------+----------------------------------------+
+   | 0x585f |   34 |   45 | craft A, the one that recurs           |
+   +--------+------+------+----------------------------------------+
+   | 0x5a8a |   14 |   20 | the later weapon, music >= 0x1c        |
+   +--------+------+------+----------------------------------------+
+   | 0x5b81 |    6 |    8 | the laser bolt, music < 0x1c           |
+   +--------+------+------+----------------------------------------+
+   | 0x5be7 |   11 |    6 | THE FLAG - pole plus banner            |
+   +--------+------+------+----------------------------------------+
+   | 0x5c47 |  120 |   94 | the THE END letters                    |
+   +--------+------+------+----------------------------------------+
+   | 0x94f4 |   54 |   54 | the car                                |
+   +--------+------+------+----------------------------------------+
+
+   0x5a8a is reached through a register, img 0x27bc, so a scan that
+   only reads the immediate before each store misses it. Both weapon
+   pointers load into AX before one shared store at img 0x27c4.
+
+6.  The transcription
+
+   sim/xcursion/parts.py has glow_render, and MODEL_BASES now carries all
+   seven entries with MODEL_NAMES beside it. sim/xcursion/demo.py part 15
+   is the battle and M cycles every model, so the flag and both
+   weapons can be looked at directly. W switches the weapon.
+
+   THE CRAFT AND SHOT POSITIONS IN THAT PART ARE OURS and the window
+   title says so. The demo's come from the mode 9, 0xa and 0xb
+   animation handlers, which are unread. Everything else - the draw
+   order, the glow's blur and decay and band, the models, the
+   attributes - is the demo's.
+
+7.  Open questions
+
+   o Text_BuildBanner at 1000:33a0 against Text_BuildMask at
+     1000:330f. The two are near-identical glyph blitters differing in
+     a row count - 8 against 0xa - and in which record pointer they
+     walk, g_BannerTextRec or g_FireTextRec. Which strings each draws
+     is unread.
+
+8.  The flight models - modes 9, 0xa and 0xb
+
+   One handler per part, dispatched out of g_AnimDispatch at
+   cs:0x982d - see subsystems/animation.txt. Modes 9 and 0xb begin
+   with Battle_Pursue, and so do modes 8 and 0xc. MODE 0xa DOES NOT -
+   it is the one exception, which is why its peel-away rotate at img
+   0x131a runs on a roll latch nothing in the handler sets.
+
+8.1.  Battle_Pursue, 1000:1ce8
+
+   CRAFT B CHASES CRAFT A, and modes 8 and 0xc use it too [verified]:
+
+       latch A's pitch, yaw and roll
+       rotate (0, 0, -0x400) by them       -> A's FORWARD VECTOR
+       negate it; add A's z to the z part  -> a point on A's heading
+       subtract B's position               -> the vector from B to it
+       SHIFT RIGHT 4 AND ADD to B
+
+   One sixteenth of the remaining gap per tick. It never arrives and
+   never overshoots, needs no velocity stored and no clamp - the
+   cheapest pursuit curve there is.
+
+   The camera moves too: the forward vector >> 6 is added to g_CamX,
+   g_CamY and g_CamZ, so the view drifts along A's heading.
+
+   ON RETURN EAX, EBX AND EDX HOLD THE FORWARD VECTOR >> 6. The mode
+   0xb handler depends on that and shifts them back left rather than
+   recomputing, so this is not a void function however it looks.
+
+8.2.  Mode 9, img 0x1264 - the approach
+
+       Battle_Pursue
+       if A.z < 0x1e000: A.z += 0x60       A CLAMP, NOT A WRAP
+       A.pitch += 3 ; A.yaw += 2 ; A.roll += 4
+       B.pitch = A.pitch ; B.yaw = A.yaw ; B.roll -= 2
+
+   A flies in from far off and halts at z = 0x1e000. CRAFT B COPIES A'S
+   PITCH AND YAW OUTRIGHT and rolls the other way, so the two are
+   banked against each other without B carrying an attitude model of
+   its own.
+
+8.3.  Mode 0xa, img 0x12a5 - the pass
+
+       B.x     = 2 * sin(cs:0x998f)
+       B.yaw   = (B.x >> 7) + 0x400
+       B.y     = 2 * sin(cs:0x9991)
+       B.pitch = B.y >> 7
+       cs:0x998f += 4 ; cs:0x9991 += 8
+       A.roll += 3 ; B.roll -= 2 ; g_CamZ += 0x400
+       if A.roll >= 0x708:
+           A.pitch -= 8
+           A.position += rotate(0, 0, -8) by A's pitch and yaw,
+                         less 0x200 in z
+
+   B FLIES A LISSAJOUS FIGURE. The two angles advance at 4 and 8, a
+   1:2 ratio, which is what makes the path a figure rather than a
+   circle.
+
+   AND IT BANKS BY READING ITS OWN POSITION. Yaw and pitch are just
+   the position shifted right 7. No velocity is kept and none is
+   needed: the derivative of a sine is another sine a quarter turn on,
+   so a shifted position is a bank angle that leads the curve by the
+   right amount for free.
+
+   A is stationary for the first part of the pass and then peels away
+   along its own heading once its roll passes 0x708.
+
+   THE TWO PHASE ACCUMULATORS ARE PLASMA_GENERATE'S OWN VARIABLES.
+   cs:0x998f and cs:0x9991 are g_PlasmaC0 and g_PlasmaC1, written and
+   read by Plasma_Generate at img 0x3fff to 0x4081 [verified]. Mode 0xa
+   borrows them as Lissajous phase because no plasma is being generated
+   during the battle. The names are correct for Plasma_Generate and
+   actively misleading here; do not rename them to suit this handler.
+
+8.4.  Mode 0xb, img 0x1351 - the locked formation
+
+       Battle_Pursue, then recover the forward vector by << 6
+       A.position = -(forward >> 2), with 0x8800 added to z
+       B.position = A.position + forward
+       A.roll -= 4 ; B.roll += 2
+       A.pitch += (0xff60 - A.pitch) >> 6
+
+   B sits EXACTLY ONE FORWARD VECTOR AHEAD OF A, rigidly - which makes
+   B the farther of the two and is the reason Battle_Run flips its
+   draw order on this mode and only this one.
+
+   A's pitch eases toward 0xff60 by a sixty-fourth of the remaining
+   distance, the same shift-and-add curve Battle_Pursue uses for
+   position. The demo uses that one idiom for every smooth approach it
+   has.

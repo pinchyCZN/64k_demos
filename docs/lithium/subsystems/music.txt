@@ -1,0 +1,442 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                        LITHIUM: THE MUSIC
+
+
+Abstract
+
+   The replayer, and the one thing about it that changes how the demo
+   should be understood: ITS MODULE USES FOUR EFFECTS IT DOES NOT
+   IMPLEMENT. Six hundred and thirty commands in kypros.s3 are read,
+   dispatched and silently discarded.
+
+   So rendering that module in a modern tracker does NOT reproduce
+   what the demo plays. The tracker honours those commands; the demo
+   ignores them.
+
+   Snd_ReplayTick at 1000:73c9 is the replayer, called from
+   Demo_TickIsr before the graphics - timeline.txt section 1. The
+   The module itself, and the 3-bit ADPCM its samples are packed as,
+   is README.txt section 6.
+
+Table of Contents
+
+   1. Where it sits
+   2. Snd_ReplayTick
+   3. g_SndEffectTable, the only jump table in the image
+   4. The effects the module uses and the replayer ignores
+   5. The clock the scenes read
+   6. Order 50 is cut to one tick
+   7. Open questions
+
+1.  Where it sits
+
+       Snd_CheckDmaBuffer   1000:6df8   the 64 KB DMA boundary test
+       Snd_SetMixRate       1000:731e   programs the PIT
+       Snd_SelectRateKeys   1000:70a2   F1 to F9 pick the rate
+       Demo_TickIsr         1000:627a   the INT 08h handler
+       Snd_ReplayTick       1000:73c9   called from it, 759 bytes
+       the volume table     1000:6eed   0x41 x 0x100, built at startup
+
+   THE REPLAYER IS THE CLOCK FOR THE WHOLE DEMO. Demo_TickIsr runs the
+   replayer and then jumps to the graphics, so the PIT rate that
+   Snd_SetMixRate programs is also the frame rate, and F1 to F9 change
+   both together - timeline.txt section 1.
+
+2.  Snd_ReplayTick
+
+       DI = 0, CX = 8                  EIGHT CHANNELS, DI is the index
+       per channel:
+           if CS:[DI+0x82d0] == 1:     a note is pending
+               toggle CS:[DI+0x82b0]
+               load CS:[DI+0x82f0], call 1000:7a7c
+               clear the pending flag
+           al = CS:[DI+0x8270]         the channel's effect command
+           if al != 0 and al <= 0x1b:
+               SI = g_SndEffectTable[al]
+               JMP SI
+           then the output path on maybe_g_SoundCardType:
+               3 -> the GUS path, 1000:7a57 / 7b11 / 7240
+               0 -> nothing
+
+   Eight channels, and the per-channel state is the same
+   bank-of-parallel-arrays style the graphics use - 0x8270, 0x8290,
+   0x81f0, 0x82b0, 0x82d0 and 0x82f0 are all indexed by DI. See
+   objects.txt section 1 for why that layout is a naming trap.
+
+   THE EFFECT DISPATCH IS A JMP, NOT A CALL, so each handler rejoins
+   the main path at 1000:7413 rather than returning.
+
+3.  g_SndEffectTable, the only jump table in the image
+
+   28 words at 1000:80d0, indexed by the S3M EFFECT LETTER - entry 1
+   is A, entry 26 is Z [verified, and every entry points into code]:
+
+       A  1000:76c1   set speed
+       B  1000:76d0   jump to order
+       C  1000:76d3   pattern break
+       D  1000:76df   volume slide
+       E  1000:775f   portamento down
+       F  1000:77a5   portamento up
+       G to R  1000:77f2   Snd_FxIgnoredGR
+       S  1000:77f5   the S3M special effects
+       T  1000:784d   set tempo
+       U to Z  1000:7872   Snd_FxIgnoredUZ
+
+   Snd_FxIgnoredGR AND Snd_FxIgnoredUZ ARE EACH ONE INSTRUCTION:
+   JMP 1000:7413, straight back to the main path. They are not stubs
+   that do a little - they do nothing at all.
+
+   Snd_FxS_Special handles only sub-command B, the pattern loop: it
+   takes the high nibble of the parameter and returns immediately
+   unless it is 0xb.
+
+   SO EIGHT OF TWENTY-SIX EFFECTS ARE IMPLEMENTED: A B C D E F S and T,
+   with S reduced to SBx.
+
+   This table is also the correction to a claim that stood in
+   timeline.txt: there IS a jump table in the image, this one. The
+   graphics dispatch still has none - it uses the patched g_TickHandler
+   word instead.
+
+4.  The effects the module uses and the replayer ignores
+
+   Counted from the embedded module's own packed pattern data
+   [verified]:
+
+   +--------+--------+------------------+---------------------------+
+   | Effect | Uses   | Implemented      | What it should do         |
+   +========+========+==================+===========================+
+   | D      |  2,166 | yes              | volume slide              |
+   | E      |  1,078 | yes              | portamento down           |
+   | O      |    430 | NO               | SET SAMPLE OFFSET         |
+   | F      |    225 | yes              | portamento up             |
+   | J      |    128 | NO               | arpeggio                  |
+   | A      |     88 | yes              | set speed                 |
+   | T      |     83 | yes              | set tempo                 |
+   | G      |     68 | NO               | tone portamento           |
+   | Q      |      4 | NO               | retrigger note            |
+   | C      |      1 | yes              | pattern break             |
+   +--------+--------+------------------+---------------------------+
+
+   630 USES ACROSS FOUR EFFECTS GO NOWHERE. O is the one that matters:
+   set sample offset, 430 uses, so EVERY SAMPLE PLAYS FROM ITS START
+   no matter what the pattern asks for.
+
+   Two readings are possible and the evidence does not separate them.
+   Either the musician wrote for a full tracker and the demo's replayer
+   quietly flattens the result, or the module was written knowing the
+   replayer and those commands are leftovers from an earlier version
+   of the song. The G and J counts argue for the first - 68 tone
+   portamentos and 128 arpeggios are deliberate musical gestures, not
+   debris.
+
+   THE PRACTICAL CONSEQUENCE: any reconstruction that plays kypros.s3
+   through a normal S3M player is NOT reproducing the demo's audio. To
+   match it, those four effects have to be suppressed.
+
+5.  The clock the scenes read
+
+   g_MusicPos at 1000:8332 is the only thing any scene takes from the
+   replayer, and it is an ORDER INDEX, not a tick count. 1000:7465
+   writes it, inside Snd_ReplayTick's Sound Blaster branch; watched
+   under DOSBox it stores the same value eight times a tick, so it is
+   a store of a position held elsewhere and not an increment
+   [verified].
+
+5.1.  The rate
+
+   Snd_SetMixRate at 1000:731e programs the PIT and the demo's whole
+   clock with it:
+
+       cx       = max(0x13, (g_MixRateBase << g_MixRateShift) >> 3)
+       divisor  = 1193181 / cx            -> g_PitDivisor, 1000:831c
+       tick rate = 1193181 / divisor      = cx Hz
+
+   so cx IS the rate in hertz. Live the divisor is 0x51c5, which is
+   57.0000 Hz exactly, and a count of emulator frames across the
+   opening agrees at 56.9 [verified].
+
+   THE 57 IS THE MODULE'S OWN, not the demo's. 1000:7865 is the Txx
+   tempo command:
+
+       g_TickRateHz = param * 2 / 5
+
+   which is the S3M tempo-to-hertz formula, and EVERY PATTERN IN THIS
+   MODULE CARRIES T144 ON ROW 0 - 144 * 2 / 5 is 57. Order 0 is
+   pattern 23 and its row 0 has one, so the rate is 57 from the first
+   row played [verified; all 39 patterns scanned].
+
+   THE DIVISION TRUNCATES, AND THAT IS AUDIBLE. 144 * 2 / 5 is 57.6
+   and 1000:7865 keeps 57, so the demo plays its module one per cent
+   SLOWER than the tempo asks for. A replayer that works the tick
+   length out from the tempo in full runs 57.6 Hz and ends up 145
+   ticks - two and a half seconds - ahead over the four minutes
+   [measured]. Anything driving a stock replayer alongside the demo's
+   own clock has to be handed the truncated rate rather than the
+   tempo; src/lithium/lithium.h LITH_IBXM_RATE is how the
+   reconstruction does it.
+
+   So the stored header tempo of 125 - which would be 50 Hz, and which
+   Demo_Main writes at 1000:01ab and the replayer again at 1000:7075 -
+   is only a default. It is overridden immediately and never heard.
+   1000:7899 restores it from g_TickRateDefault at the end of the
+   order list.
+
+   Ghidra's xrefs list only Demo_Main as writing g_TickRateHz and that
+   is incomplete: 1000:707c, 1000:786b and 1000:789d all write it too,
+   and a byte search for the store is what finds them.
+
+   F1 to F9 move the shift, so with that base the selectable rates
+   are 19, 28, 57, 114, 228, 456, 912, 1824 and 3648 Hz - the clamp
+   at 0x13 is what flattens the bottom two.
+
+   THE SAME DIVISOR IS ALSO A 16.16 STEP. Tick_Default adds
+   g_PitDivisor to g_TimerChainAcc at 1000:88b3 and far-calls
+   g_OldTimerIsrOff on each carry out of 0x10000, which lands on
+   57.0000 x 0x51c5 / 65536 = 18.2065 Hz - the saved BIOS handler,
+   kept fed so the DOS time of day survives the fast timer
+   [verified].
+
+5.2.  g_MusicPos is the cursor, and the tick chain is gated
+
+   THE INTERRUPT DOES NOTHING UNTIL THE MUSIC IS ARMED. Demo_TickIsr
+   tests g_MixRateShift at 1000:6282 and jumps straight to its tail
+   while that is zero, past Snd_ReplayTick AND the scene's tick
+   handler AND Tick_Default's palette fade. 1000:708f is what sets
+   it, and that is three instructions before the first scene runs
+   [verified]. So Demo_Main's whole setup passes without a single
+   tick of the chain, and the opening starts with g_PalFade still at
+   its stored 0xff00 - which is the opening's fade-up out of black,
+   ../effects/rockintro.txt section 7.
+
+   It also means nothing has elapsed to put the module part way into
+   its order list, so the list is played from its first entry.
+
+   g_MusicPos IS ONE AHEAD OF WHAT IS SOUNDING. 1000:7875 reads the
+   order-list entry at the cursor and THEN increments it:
+
+       MOV BX, CS:[0x8330]          the cursor
+       INC word ptr CS:[0x8330]
+       MOV BL, byte ptr CS:[BX + 0x8370]    the entry it just left
+
+   so the word at img 0x8332 counts entries STARTED, and entry 6
+   plays while it reads 7. Measured: the cursor goes to 7 and then
+   to 8 fifty-seven display frames apart, which is 47 ticks, and the
+   48-tick entry is 6 [verified].
+
+   READING IT AS THE ENTRY PLAYING IS THE TRAP, and it hides itself
+   twice over. Every boundary then appears one entry early, so the
+   cursor reaching 1 at tick 4 reads as order 1 beginning there and
+   makes order 0 look dropped, while the break lands on the entry
+   BEFORE the one that carries it. Both misreadings cancel inside
+   the opening - whose orders are all 384 ticks - and only separate
+   at entry 6, the one that is short.
+
+   WHAT IS ACTUALLY MEASURED is the cursor reaching 1 at tick 4, 2 at
+   388, 4 at 1156 and 5 at 1540, so entry N begins at 4 + 384N and
+   ORDER 0 PLAYS IN FULL. The boundary at tick 388 reproduces on a
+   separate cold run, so this is stable and not a property of the
+   host [verified].
+
+5.3.  One tick is one music tick
+
+   Demo_TickIsr calls Snd_ReplayTick once per interrupt and then jumps
+   to the graphics handler, so there is no divider between the two
+   clocks. Trapped on the g_MusicPosLast write, the opening's order 4
+   begins 1156 ticks in and order 5 at 1540 - 384 apart, which is 64
+   rows times the module's stored speed of 6 [verified].
+
+   So ONE ORDER IS 64 x speed TICKS, which is the fact a port needs:
+   it fixes the order boundaries without knowing a frame rate, because
+   tempo sets only the wall clock and speed only the tick count.
+
+   THE SPEED IS NOT CONSTANT ACROSS THE MODULE and a port that assumes
+   it will drift. The opening plays orders 0 to 5, which are patterns
+   23, 24, 25 and 26; pattern 23 sets A6 and none of the others
+   changes it, so all six orders are 384 ticks and that is what the
+   emulator measures. Most of the other patterns set A3 - 192 ticks an
+   order - and pattern 37 steps A9, A16, A17 within itself [verified;
+   all 39 patterns scanned].
+
+   THE SEQUENCER IS NOT NEEDED TO FOLLOW IT. The order list and the
+   patterns' A, B and C effects are all the boundaries depend on, so
+   walking the list once at startup gives every one of them without
+   playing a note - section 5.4.
+
+5.4.  The order timeline
+
+   Walking the order list, carrying the speed forward and stopping a
+   pattern on the row that holds its break:
+
+   THE LEFT COLUMN IS WHAT g_MusicPos READS, which is one more than
+   the entry sounding - section 5.2. A gate in the demo compares
+   against that word, so this is the column a port's gate wants.
+
+   +----------+-------+---------+------+-------+--------+-----------+
+   | g_Music  | Entry | Pattern | Rows | Speed | Ticks  | Begins at |
+   |   Pos    |       |         |      |       |        |           |
+   +==========+=======+=========+======+=======+========+===========+
+   | 1        | 0     | 23      | 64   | 6     | 384    | 4         |
+   | 2        | 1     | 24      | 64   | 6     | 384    | 388       |
+   | 3        | 2     | 25      | 64   | 6     | 384    | 772       |
+   | 4        | 3     | 26      | 64   | 6     | 384    | 1156      |
+   | 5        | 4     | 25      | 64   | 6     | 384    | 1540      |
+   | 6        | 5     | 26      | 64   | 6     | 384    | 1924      |
+   | 7        | 6     | 3       | 16   | 6->3  | 48     | 2308      |
+   | 8        | 7     | 4       | 64   | 3     | 192    | 2356      |
+   | 9        | 8     | 2       | 64   | 3     | 192    | 2548      |
+   | 10       | 9     | 4       | 64   | 3     | 192    | 2740      |
+   | 11       | 10    | 5       | 64   | 3     | 192    | 2932      |
+   +----------+-------+---------+------+-------+--------+-----------+
+
+   The walk reproduces every boundary the emulator has been trapped
+   at and was not built from - the cursor reaching 2 at 388, 4 at
+   1156, 5 at 1540, 7 at 2308 and 8 at 2356 [verified].
+
+   ENTRY 6 IS THE TURN, and both things turn on it. Pattern 3 sets
+   A3 on row 0, so it and every entry after it runs at speed 3 - 192
+   ticks for a full 64 rows - and it carries the module's only effect
+   C, C00 on row 15 channel 6, which ends it after sixteen rows at
+   48 ticks. The handler is 1000:76d3 and it calls the order advance
+   at 1000:7875 directly.
+
+   SO THE SHORT ORDER IS ENTRY 6 AND NOT THE ONE BEFORE IT. Measured:
+   the cursor goes to 7 at display frame 3990 and to 8 at 4047, 57
+   frames apart, which at 0.81 ticks a frame is 47 - the 48-tick
+   entry [verified]. Attributing the break one entry early instead
+   gives the 384-tick entry 5 that length and leaves entry 6 at 192.
+
+   A port that keeps the stored speed of 6 throughout puts the
+   flyover 908 ticks late and halves the rate of its credit roll.
+
+   THE SURFACE FLYOVER THEREFORE BEGINS AT TICK 2356, when the cursor
+   reaches 8, and each of its credits lasts 192 ticks, about 3.4
+   seconds - ../effects/text.txt section 7.2.
+
+5.5.  Which tick a snapshot is at
+
+   An emulator snapshot carries no tick counter, so nothing in it
+   says WHERE IN THE DEMO it sits - and without that, a difference
+   between the demo's picture and a port's may only be the two
+   being at different moments. Three values between them pin one
+   tick exactly:
+
+   o  g_MusicPos gives the order, and the table above its first tick.
+   o  g_CreditFade counts down from 0xf one step per eight ticks, so
+      it gives the position within the order to within eight.
+   o  g_CreditTick is a free-running byte from the scene's first
+      tick, so its value mod 256 picks the single tick that fits.
+
+   Worked for the flare's first appearance: order 10, fade 4 and
+   g_CreditTick 0xd8 agree on tick 2636 and on no other [verified].
+   Our own dumper renders one tick per frame, so that is frame 2636
+   of the reconstruction.
+
+   TWO THINGS NARROW IT LESS THAN THEY LOOK. g_MusicPos lags the
+   computed boundary by a tick or two, since the replayer advances
+   the order after the pattern's last row finishes; and once the
+   credit roll reaches the end of its table the fade is forced to 0
+   for the rest of the scene - ../effects/text.txt 7.2 - so a zero
+   fade after credit index 7 carries nothing. tools/savestate_tick.py
+   allows for both.
+
+5.6.  What it is used for
+
+   Two things, and both end parts rather than decorate them:
+
+   o  A runner's exit test. maybe_Scene_RockIntro at 1000:16bf leaves
+      only when g_MusicPos >= 4 AND g_PalFade < 0xff60.
+
+   o  Arming a fade. Tick_RockIntro2 at 1000:638a sets
+      g_PalFadeTarget2 to 0xff00 once g_MusicPos >= 6, and
+      Tick_Default's walk then carries g_PalFade past the runner's
+      threshold 161 ticks later.
+
+   The consequence for the reconstruction is that A PART CANNOT END
+   WITHOUT THE CLOCK, which is why src/lithium/lithium_music.c keeps
+   g_MusicPos even though Demo_Audio is silent.
+
+6.  Order 50 is cut to one tick
+
+   The order timeline of section 5.4 is exact for every entry but
+   one. Entry 50 - pattern 0x10 - should run 64 rows at speed 6 for
+   384 ticks. It runs for a single tick.
+
+   Measured: the cursor reaches 51 at display frame 17615 and 52 at
+   17616, one frame apart, where every neighbouring order is 236
+   frames or more. The rate through that scene is a constant 0.8136
+   ticks a frame - entries 52 to 56 give 472/384, 531/432 and
+   1171/952 - so the one frame is one tick and not a lost frame
+   [verified].
+
+   NOTHING IN THE PATTERN DATA PREDICTS IT. Entry 51 is the same
+   pattern 0x10 and runs the full 384. Pattern 0x10 carries one A
+   effect, A06 on row 0, and no B or C. The module encodes one C in
+   total, in pattern 3, and no row entry anywhere names a channel
+   above 7. g_SndOrderList and g_SndPatternTable are byte-identical
+   to the module's at runtime, and Snd_ExpandSamples changes no byte
+   of the pattern area - the expansion fills from 0x82b0 and the
+   patterns end at 0x82ac.
+
+   THE CAUSE IS A READ PAST THE END OF g_SndChanCmd. That table is
+   eight 4-byte entries, 1000:8270 to 1000:828f, and the per-row
+   clear at 1000:75b2 clears exactly those eight. g_SndChanPeriod
+   (1000:8290) follows it. The effect pass has been halted
+   dispatching with di = 0x24 - 1000:8294, channel 1's period -
+   where the period's LOW BYTE is taken for a pending command. At
+   this order that period is 0x6b03; 3 is C; Snd_FxC_PatternBreak
+   advances the order on the tick after the first row is parsed
+   [verified: the handler halts there with di = 0x24 and eax = 3,
+   and the return address of its call to Snd_NextOrder is 0x76dc,
+   not the 0x75ce of the normal end-of-pattern path].
+
+   Most periods alias to a command above 0x1b, which the dispatch
+   rejects, and that is why one order in four minutes is affected -
+   a run from the start to the module's loop point shows exactly one
+   anomalous double advance.
+
+   A PORT CANNOT DERIVE THIS AND HAS TO CARRY IT. The period depends
+   on the whole mixer's per-tick state, so a static walk of the
+   order list cannot produce it; src/lithium/lithium_music.c names
+   the order and its length LITH_ORDER_STRAY_BREAK and
+   LITH_ORDER_STRAY_TICKS. Walking 384 there instead runs the
+   greetings 383 ticks long, which is the credit roll passing the
+   end of its table and starting the names again -
+   ../effects/text.txt section 7.2.
+
+   Confirmed across the whole song: with entry 50 at one tick the
+   walk totals 13,749 ticks, and the module's loop point was trapped
+   at display frame 21213, which the same anchor and rate put at
+   13,760 [verified].
+
+7.  Open questions
+
+   o The SB output path. Only the GUS branch has been followed, on
+     maybe_g_SoundCardType == 3; the Sound Blaster branch at
+     1000:7461 and 1000:7469 is unread.
+
+   o 1000:7a7c, 1000:7a57, 1000:7b11 and 1000:7240, the four routines
+     the channel loop calls. The GUS voice setup, presumably.
+
+   o How di reaches 0x24 in the effect pass - section 6. 1000:73c9
+     zeroes di, the loop count is a literal 8 in live memory, the
+     bottom at 1000:7469 adds 4 once per iteration whichever path
+     the body takes, Demo_TickIsr is the only caller and enters at
+     1000:73c9, and di is protected by pushad across the only call
+     in the body. di = 0x24 with cx = 1 is exactly what a loop that
+     began at di = 8 would give, and nothing read so far sets it
+     there.
+
+   o Which of the replayer's reads come from the expanded module and
+     which from its own tables. Every GS load in the sound code takes
+     segment 0x3ad2, the expansion Snd_ExpandSamples builds
+     (../README.txt section 6), but the order list is read
+     CS-relative at 1000:8370, so at least that table is the
+     replayer's own and not the module's.
+
+   o Entry 0 and entry 27 of g_SndEffectTable point to 1000:038b and
+     1000:1500, neither of which is in the replayer. Entry 0 is
+     unreachable because the dispatch tests for zero first; entry 27
+     is reachable, since the bound is al <= 0x1b.

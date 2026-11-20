@@ -1,0 +1,211 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                     EXCURSION: THE FIRE TEXT
+
+
+Abstract
+
+   FireText_Render at XCURSION_U.EXE 1000:2370, ported in
+   src/xcursion/. A mask is filled with
+   the plasma texture, thresholded and biased into the palette's fire
+   band, with the texture sampled on a negative row stride so the
+   flame crawls upward. This is the flame behind the opening text.
+
+   The threshold is the flame's height control and it is the whole of
+   the animation.
+
+   Transcribed as firetext_fill in sim/xcursion/parts.py, part 10 of
+   sim/xcursion/demo.py. What the mask is made of is still open - section 5.
+
+Table of Contents
+
+   1. The fill
+   2. Why it was hard to find
+   3. The frame
+   4. What the reconstruction diverges on
+   5. Where the mask comes from
+      5.1. What fills the texture
+   6. What animates the threshold
+      6.1. The threshold moves while the fill runs
+   7. Open questions
+
+1.  The fill
+
+   img 0x23a3 - 0x23c6 [verified]. The segments and cursors:
+
+   +------------------+------------------------------------------------+
+   | Register         | What                                           |
+   +==================+================================================+
+   | FS = 0x2a79      | the plasma texture                             |
+   | ES = g_WorkSeg   | 0x5a79, the offscreen buffer                   |
+   | DS = 0x6a79      | THE MASK, one byte per pixel                   |
+   | DI               | g_FireTextOfs, the start offset in both        |
+   | DX               | g_FireTextRows, how many 320-pixel rows        |
+   | BX               | g_FireTexBase, the texture row cursor          |
+   +------------------+------------------------------------------------+
+
+   Per pixel, and only where the mask byte is non-zero:
+
+       v = texture[bx + di] - g_FireThreshold
+       if v >= 0:  work[di] = (v >> 2) + 0x60
+
+   The shift by 2 takes a 0..255 texture sample to 0..63 and the +0x60
+   lands it in **0x60..0x9f**, the lower two thirds of Pal_BuildMain's
+   fire ramp - black through red into the start of yellow. The hottest
+   third of the band, 0xa0..0xbf, is never reached by this routine.
+
+   **g_FireThreshold IS THE FLAME HEIGHT.** Raising it rejects more of
+   the texture, so fewer pixels pass the `v >= 0` test and the fill
+   retreats; lowering it lets the flame climb the mask. Together with
+   img 0x23c2 stepping bx by -0x40 per row - sampling the texture on a
+   NEGATIVE row stride, so each screen row reads 64 bytes earlier in
+   the texture - that is the entire animation. Nothing else moves.
+
+   A rejected pixel is left alone rather than cleared, so whatever the
+   work buffer already held shows through. The flame does not erase
+   itself; something else owns the background.
+
+2.  Why it was hard to find
+
+   A note about the problem, not the search. Two band transforms are
+   plain in Demo_Timeline - `(v>>2)+0x20` for blue and `(v>>3)+0xe0`
+   for grey - so the obvious way to find the flame is to look for the
+   same shape aimed at 96..191.
+
+   **NEITHER FIRE USER USES A TRANSFORM.** Countdown_Render reaches the
+   band by CLAMPING - two compares against 0xc0 and 0x60 - and this
+   routine reaches it by a THRESHOLD and a bias. Searching for a
+   `(v>>n)+0x60` mapping over the whole image finds nothing at all.
+
+   What does find both is the constant 0x60 itself as an immediate:
+   exactly two sites, img 0x23ba here and img 0x398a in
+   Countdown_Render.
+
+3.  The frame
+
+   The tail is the standard runner shape, so FireText_Render is a part
+   in its own right and its length is set by the music [verified]:
+
+       img 23c8  Vga_Present
+       img 23cb  Input_Poll
+       img 23ce  loop while g_MusicPos < g_MusicPosTarget
+
+   Before the fill, every frame:
+
+       img 2370  call 1000:3620
+       img 2373  call 1000:45eb - recomputes the camera into
+                 cs:[0x9454], [0x9458] and [0x945c]
+       img 2376  call 1000:465c, but only when ecx < 0x28000
+
+   1000:3620 is unread and is also called from Demo_Timeline, so it is
+   shared machinery rather than part of this effect.
+
+4.  What the reconstruction diverges on
+
+   Two substitutions, both stated rather than hidden:
+
+   o **The mask, in sim/ only.** sim/ borrows a countdown glyph
+     through countdown_mask_as_bitmap, which predates section 5.
+     src/xcursion/xcursion_text.c builds the real one from
+     Text_BuildMask and the font, and the three captions read back
+     off it correctly, so this substitution is sim/'s alone now.
+   o **The threshold sweep is a stand-in in src/.** Section 6 has the
+     real mechanism; src/ ramps the threshold and steps the captions
+     on a timer instead, both marked OURS in the file.
+
+   Everything in section 1 is transcribed exactly.
+
+5.  Where the mask comes from
+
+   Text_BuildMask at 1000:330f. Its first act, img 0x3318 to 0x3325,
+   is ES = 0x6a79 and a clear of 0x3e80 dwords - the whole 320x200 -
+   and it then blits glyphs from the font at img 0x615e into it
+   [verified].
+
+   It also walks g_FireTextRec, three words per record - a text
+   pointer, a destination offset and a length - and ADVANCES IT BY 6
+   at img 0x3330, so each call loads the next caption.
+
+5.1.  What fills the texture
+
+   Plasma_Generate(mask 0x7fff, bias 0x4000, rough 3), and NO
+   post-transform [verified].
+
+   MEASURED AGAINST A RUNNING DEMO, not inferred. Segment 0x2a79 is
+   fs in the fill loop, which at a load segment of 0x01a5 is 1c1e;
+   reading it out of the emulator and comparing against the generator
+   gives an exact match over two independent regions - 96 bytes at
+   offset 0 and 80 at 0x8000, zero differences. A parameter sweep
+   finds no other combination that matches even approximately.
+
+   The first byte is 0xb3 whatever the parameters are, because it is
+   the generator's own first random byte and is written before any
+   octave runs - so matching byte 0 proves the seed and nothing else.
+
+   effects/countdown.txt asks the same question of the same segment.
+
+6.  What animates the threshold
+
+   g_FireThreshold is animated by MODE 0 at img 0x0db4, which is
+   reached as g_AnimMode's STATIC value and not by any write: the
+   script's first write at img 0x0163 comes after FireText_Render is
+   already called at img 0x0160 [verified].
+
+       g_FireThreshold += g_FireThreshDir
+       at -0x30 the direction flips to +1
+       at 0x110 it flips to -1 AND CALLS Text_BuildMask
+
+   A TRIANGLE WAVE WHOSE TOP ADVANCES THE TEXT. The flame sweeps up
+   through the mask, and when the sweep completes the next caption is
+   built. That is the whole of the opening's text sequencing, and it
+   is why no part of the script mentions the second caption.
+
+   The same handler pans g_FireTexBase by 0x101 - one step in each
+   byte of the word at once. Confirmed live: a fill caught 39 rows in
+   had bx = 0xc008 against a stored g_FireTexBase of 0xcac9, and
+   0xcac9 - 0x101 - 39*0x40 is exactly 0xc008, so the pan had already
+   happened for the next frame while this one was still drawing.
+
+6.1.  THE THRESHOLD MOVES WHILE THE FILL RUNS
+
+   img 0x23b0 re-reads g_FireThreshold FOR EVERY PIXEL, and the
+   handler above is on a timer, so the value drifts DOWN THE ROWS of
+   a single caption. The flame edge is therefore not level across the
+   glyphs within one frame, and a reconstruction that applies one
+   threshold per frame is close but never exact.
+
+   Measured in one frame of a running demo, caption 0 at a stored
+   threshold of 0x59 [verified]:
+
+   +-------------------+------------------------------------------+
+   | Caption rows      | The threshold that reproduces them       |
+   +===================+==========================================+
+   | 10 to 13          | 0x57                                     |
+   | 18                | 0x59, exactly - zero differing pixels    |
+   +-------------------+------------------------------------------+
+
+   So it rose about two units over seven rows here, which is many
+   timer ticks inside one fill.
+
+TWO UNITS A FRAME, AND THAT IS WHY. The handler ticks twice per
+   displayed frame - measured off the camera integrator it shares,
+   ../effects/voxel.txt section 8.2 - and it moves the threshold by
+   one a tick. Two is exactly the 0x57 against 0x59 above.
+
+   WHERE in the fill each tick lands is still the timer against
+   however fast the fill runs, so which rows see which value is not
+   a property of the binary. The rate is; the phase within a frame is
+   not.
+
+7.  Open questions
+
+   o **1000:3620**, called every frame here and from Demo_Timeline.
+     Unread, and shared, so it is worth reading for both.
+
+   o **g_FireTextOfs and g_FireTextRows** are read and never written in
+     any attributed function. RESOLVED AS A CLASS: that is the
+     signature of a global written by one of Timer_Isr's per-tick
+     handlers, which are unattributed code -
+     subsystems/animation.txt. Which handler is still open. Their
+     static initial values are readable from the dump.

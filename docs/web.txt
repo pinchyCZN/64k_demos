@@ -1,0 +1,194 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                        THE BROWSER BUILD
+
+
+Abstract
+
+   How src/ becomes a page, and the two things about that page which
+   are not obvious from the code: where its prose comes from, and why
+   it waits for a click.
+
+   This is about OUR port, not about any demo. Nothing here is a
+   finding about a binary, so the evidence tags of README.txt section
+   2 do not apply. Per-demo facts stay in docs/<demo>/.
+
+   The build is tools/build_web.sh, which is also the only C89 check
+   this project has - see section 4.
+
+Table of Contents
+
+   1. What The Build Produces
+   2. The Page
+      2.1. The Two Slots
+      2.2. Adding A Demo
+   3. Click To Start
+      3.1. Why A Browser Will Not Just Play It
+      3.2. What The Native Build Does Instead
+   4. The C89 Gate
+   5. Open Questions
+
+1.  What The Build Produces
+
+   One demo per invocation:
+
+       sh tools/build_web.sh ukko build/web
+
+   emcc emits <demo>.html, .js and .wasm. The original packed EXE is
+   EMBEDDED at the same relative path the native build opens, so no
+   file under src/ knows which host it is under, and no unpacked
+   image exists at any point on disk.
+
+   A file:// page cannot read embedded data. It has to be served.
+
+   THE EMBEDDED IMAGE IS NOT CONTIGUOUS IN THE .wasm AND IT IS STILL
+   COMPLETE. Zero runs in the original are elided - wasm linear
+   memory starts zeroed, so a data segment skips them and resumes at
+   a fresh offset. Searching the .wasm for the whole EXE therefore
+   fails at the first run of zeros, which looks exactly like a
+   truncated embed and is not one.
+
+   ON WINDOWS emsdk SHIPS emcc.bat WITHOUT THE EXECUTABLE BIT, so
+   command -v will not report it however good PATH is: bash runs it
+   through its Windows layer, sh honours the mode bits and refuses.
+   The build falls back to walking PATH for the file itself and
+   calling it by its full path, which works in both. EMCC=<path>
+   overrides the search.
+
+2.  The Page
+
+   emcc does not generate the page. It copies a shell file through
+   verbatim, substituting only its own {{{ SCRIPT }}} token, so the
+   HTML around the canvas is entirely ours:
+
+       tools/web_shell.html      the template - layout, CSS, the
+                                 start overlay. Shared by every demo.
+       tools/web/<demo>.html     that demo's prose, as an HTML
+                                 fragment. One file per demo.
+
+   THE PROSE IS HTML RATHER THAN A TEXT FORMAT because it has to
+   carry links, and HTML is the only format in which a link needs no
+   converter. These files are web assets, like the template; the
+   plain-text rule of README.txt section 9 governs docs/, not these.
+   They are still ASCII.
+
+   A fragment's first line carries its title, which becomes the
+   browser tab:
+
+       <!-- title: UKKO - StickMan's World (1995) -->
+
+2.1.  The Two Slots
+
+   The template has a title slot and a content slot, and the build
+   composes template plus fragment into a THROWAWAY COPY under
+   build/. Three rules follow from how that is done, and breaking any
+   of them fails silently:
+
+   +-----------------------------+--------------------------------+
+   | Rule                        | What happens otherwise         |
+   +=============================+================================+
+   | The template is never       | the slots are consumed, so the |
+   | edited in place             | first demo builds correctly    |
+   |                             | and every one after it ships   |
+   |                             | the first one's text           |
+   | Neither slot's name appears | the build matches by text, so  |
+   | anywhere else in the        | a mention is a second slot and |
+   | template, comments included | gets its own copy of the prose |
+   | The content slot sits ALONE | the line is deleted once the   |
+   | on its line                 | fragment has been read in, and |
+   |                             | anything sharing it goes too   |
+   +-----------------------------+--------------------------------+
+
+   The fragment is read in with sed's r command rather than
+   substituted, so & and | in the prose need no escaping.
+
+   A MISSING FRAGMENT IS A WARNING, NOT AN ERROR. The build is also
+   the C89 gate, and it has to stay runnable before a new demo has
+   any prose written for it.
+
+2.2.  Adding A Demo
+
+   Write tools/web/<demo>.html with a title line. Nothing else: the
+   template, the CSS and the start overlay are shared.
+
+   Three demos in a browser also want an index page linking them.
+   emcc will not produce one - it only ever emits the demo it was
+   asked for - so that page is hand-written and is not yet done.
+
+3.  Click To Start
+
+   The page shows the demo's first frame under a CLICK TO START
+   overlay and runs nothing until the visitor clicks. The click
+   starts the picture and the sound together.
+
+   The demo clock is held at frame 0 and RE-STAMPED every pass while
+   it waits, so no backlog accrues and the click does not open with a
+   lurch of catch-up frames.
+
+   One frame is rendered before the loop is registered, as a poster
+   frame; the tick counters move with it so the first advance does
+   not draw it twice. For UKKO that frame is the title screen, which
+   is held for 0x1a9 retraces anyway.
+
+   The page reaches the host through one exported function,
+   Host_Start. It is exported BY NAME from the build script rather
+   than with EMSCRIPTEN_KEEPALIVE, which is an attribute and would
+   not survive the C89 gate.
+
+   A click that lands before the wasm is up is remembered and
+   replayed, not lost.
+
+3.1.  Why A Browser Will Not Just Play It
+
+   A browser will not let a page make a sound until the visitor has
+   gestured at it. Audio created before any gesture starts suspended,
+   and this is policy in every current browser, not an emscripten
+   choice and not something a page can opt out of. Muted autoplay is
+   permitted, which is why video plays silently but sound does not.
+
+   SO A DEMO THAT STARTS ON LOAD DESYNCS. Its visuals run against a
+   suspended audio device: the queue never drains, so the replayer
+   stalls after about 125 ms while the frame clock keeps going. By
+   the time a click arrives the picture is seconds ahead of the
+   music, and no warning on the page fixes that.
+
+   Waiting for the click makes the one gesture start both, so the
+   condition cannot arise. That is the reason for the overlay - being
+   able to tell the visitor where the sound is comes second.
+
+   It also looks inconsistent while being tested. Chrome keeps a
+   per-site engagement score and may allow autoplay on a site the
+   user visits often, so the same build behaves differently on two
+   machines.
+
+3.2.  What The Native Build Does Instead
+
+   Nothing. There is no such rule outside a browser, so the native
+   build starts immediately as it always has. The gate is one flag
+   that is compiled to a constant 1 when the target is not
+   emscripten, and the whole difference is that initialiser.
+
+4.  The C89 Gate
+
+   RUN THE WEB BUILD EVEN WHEN NOT SHIPPING ONE. emcc is clang with
+   -std=c89 -pedantic -Wall -Wextra, and MSVC has no C89 switch at
+   all, so this is the only thing that actually enforces README.txt
+   section 16.
+
+   Third-party sources compile under the same strict flags, which is
+   only possible because of what was picked: ibxm builds with -ansi
+   -pedantic in its own makefile. Vendoring something written in C99
+   style later means compiling it separately with its own flags, or
+   loosening the flags for our code too - which would throw away the
+   thing that makes running this worthwhile.
+
+5.  Open Questions
+
+   o  The index page of section 2.2 is not written.
+
+   o  The repository URL is a placeholder in every demo's fragment.
+
+   o  A phone can satisfy the start gesture but cannot drive the
+      demo, which needs a keyboard. The page says so; it does nothing
+      about it.

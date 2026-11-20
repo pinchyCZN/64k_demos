@@ -1,0 +1,250 @@
+PCDEMOS 64k                                            Analysis Note
+
+
+                      EXCURSION: THE MOIRE
+
+
+Abstract
+
+   Moire_Render at 1000:2818, part sync 0x14. Lines that squeeze
+   together and expand - and NOTHING IN THE ROUTINE PLOTS A LINE.
+
+   The lines are the mod-256 wrap of an accumulating ramp. Each pixel
+   adds a smooth increment to itself every frame; because neighbouring
+   columns differ by 1 in that increment, after n frames they differ
+   by n, and an 8-bit accumulator bands at 256/n pixels.
+
+   So the effect's whole content is one subtraction and one 8-bit
+   store. It is the cheapest thing in the demo and among the most
+   striking.
+
+Table of Contents
+
+   1. The routine
+      1.1. The part, and the fade
+   2. Why there are lines at all
+   3. Why they squeeze, and why they expand again
+   4. The sine read one byte in
+   5. The palette, which has no red in it
+   6. The transcription
+   7. Open questions
+
+1.  The routine
+
+   It is its own runner - img 0x286f loops the whole function until
+   g_MusicPos reaches the target, so there is no separate Run
+   function. Called once, at img 0x0457, with target 0x14 [verified].
+
+   Its g_AnimMode is 7, whose handler at img 0x11dd only fades. That
+   is all this part needs, because the phase is advanced inside the
+   renderer rather than by a handler.
+
+       DS = 0x2a79   THE ACCUMULATOR. It clobbers the texture there
+       ES = 0xa000   the screen, written directly - no work buffer
+       img 2818  g_RenderDisabled skips the render and just waits
+
+   g_RenderDisabled at img 0xa87d is NOT an effect parameter. It is
+   F1's detail switch out of Input_Poll at img 0x0afb, which runs the
+   demo at 25 Hz with rendering and the animation modes turned off;
+   every other key clears it. It is 0 in the image, so a
+   reconstruction without an F1 key renders unconditionally.
+
+   g_MoirePhase at img 0x9921 is read and written by this routine and
+   by nothing else [verified], so it starts from its image static of
+   0.
+
+   per pixel, img 0x2847 to 0x285e:
+
+       increment = sin5(rowPhase) + (200 - row) - col + sin5(colPhase)
+       field[di] = (field[di] + increment) & 0xff
+       screen[di] = field[di]
+
+   ADD AL, [DI] at img 0x2852 IS A BYTE ADD. The accumulation is mod
+   256 and the carry never reaches AH, which is why the wrap is clean.
+
+   The three phases all advance:
+
+       img 2859   the column phase, 8 per pixel
+       img 2860   the row phase, 8 per row
+       img 2866   g_MoirePhase, 2 per FRAME
+
+   The two are seeded differently, and that asymmetry matters. SI, the
+   row phase, is loaded from g_MoirePhase ONCE at img 0x282d, before
+   the row loop, and then advances 8 per row - so it accumulates down
+   the screen. BX, the column phase, is RE-SEEDED from g_MoirePhase at
+   the top of every row, img 0x2837, so every row starts its column
+   sweep from the same angle.
+
+1.1.  The part, and the fade
+
+   img 0x042d, in order [verified]:
+
+       Pal_BuildBluePurple                        img 0x042d
+       g_FadeLevel = 0xc000, Pal_Fade             img 0x0430
+       ZERO ALL 64 KB of segment 0x2a79           img 0x043a
+       g_AnimMode = 7                             img 0x044a
+       g_MusicPosTarget = 0x14                    img 0x0450
+       Moire_Render                               img 0x0457
+
+   SAME PALETTE AND SAME FADE FLOOR AS THE PLASMA WARP BEFORE IT, so
+   the moire rises out of black with no cut and no palette change -
+   see effects/warp.txt section 4 for the ramp.
+
+   THE ACCUMULATOR IS ZEROED FIRST, img 0x0447, 0x4000 dwords over the
+   field the warp was just sampling. Entering on a field that still
+   holds a plasma accumulates from that instead of from flat and the
+   bands never resolve.
+
+   Mode 7 at img 0x11dd is two lines and they go opposite ways
+   [verified]:
+
+       order != 0x13 : if the level is not 0, += 0x100, then Pal_Fade
+       order == 0x13 : += 0x60, then Pal_Fade
+
+   Below the last order the level climbs from 0xc000 by 0x100 and
+   STOPS DEAD at zero, which is the fade in - 64 passes. At order 0x13
+   it keeps climbing past zero by 0x60 a pass, and a positive bias is
+   Pal_Fade brightening, so THE PART ENDS BY WASHING OUT TO WHITE
+   rather than dimming.
+
+2.  Why there are lines at all
+
+   Nothing draws an edge. The field is 8-bit and the increment is
+   smooth, so the value at a pixel after n frames is about n times its
+   increment, TAKEN MOD 256 - and the places where that sum crosses a
+   multiple of 256 are where the colour jumps from 255 to 0.
+
+   Those jumps are the lines. They are an artifact of integer overflow
+   being allowed to show, which is why the effect costs nothing: there
+   is no edge test, no threshold and no second buffer.
+
+3.  Why they squeeze, and why they expand again
+
+   img 0x285d decrements DX once per column, which is the -col term.
+   Neighbouring columns therefore differ by exactly 1 in their
+   increment, so they differ by n after n frames, and the mod-256
+   banding period is 256/n columns.
+
+   Measured on the transcription, band width across the centre row
+   [verified by transcription]:
+
+   +--------+-------------+--------+-------------+
+   | frame  | band width  | frame  | band width  |
+   +========+=============+========+=============+
+   |    1   |   320 px    |   32   |    8.4 px   |
+   |    2   |   160 px    |   64   |    4.2 px   |
+   |    4   |    64 px    |  120   |    2.2 px   |
+   |    8   |    32 px    |  200   |    3.4 px   |
+   |   16   |  16.8 px    |  256   |    4.5 px   |
+   +--------+-------------+--------+-------------+
+
+   SO IT SQUEEZES AND THEN EXPANDS, which is what the demo shows
+   [observed].
+
+   THE TURN IS NOT A CLEAN WRAP OF THE ACCUMULATOR, and that was the
+   obvious wrong answer. If the increment were exactly C - col, the
+   per-column step would reach 256 at frame 256 and the bands would
+   vanish and restart. They do not: the width bottoms out near frame
+   120 and widens smoothly after it.
+
+   What turns it is the phases. g_MoirePhase advances 2 a frame and
+   feeds both the row and column sine lookups, so the increment is
+   never exactly C - col and the effective step drifts off any integer
+   multiple. The spacing breathes instead of resetting.
+
+   The (200 - row) term gives each row a different offset, which is
+   what makes the bands diagonal rather than vertical.
+
+4.  The sine read one byte in
+
+       img 2840   MOV DX, word ptr CS:[SI + 0x7f5f]
+       img 284d   ADD AX, word ptr CS:[BX + 0x7f5f]
+
+   g_SinTable is at img 0x7f5e and holds DWORDS. A word read at +1 is
+   bytes 1 and 2 of a little-endian dword, which is bits 8 to 23 - so
+   THE ODD OFFSET IS A FREE SHIFT RIGHT BY 8 [verified]:
+
+       angle 0x000   dword      0   word at +1      0
+       angle 0x200   dword   4095   word at +1     15
+       angle 0x600   dword  -4095   word at +1    -16
+
+   A 5-bit sine of +/-15, with the sign preserved and no shift
+   instruction. It is not a misaligned read, and "correcting" it to
+   0x7f5e would multiply the sine term by 256 and destroy the effect.
+
+   At +/-15 against a ramp that spans 320, the sines bend the bands
+   rather than forming them.
+
+5.  The palette, which has no red in it
+
+   THE MOIRE DOES NOT RUN UNDER Pal_BuildMain, and the ordering is
+   what settles it [verified]:
+
+       img 042d   Pal_BuildBluePurple
+       img 0437   Pal_Fade
+       img 0457   MOIRE_RENDER
+       img 045d   Pal_BuildMain
+
+   Pal_BuildMain runs AFTER the moire's only call site, so the part
+   carries the palette installed at img 0x042d and none of
+   Pal_BuildMain's fire ramp reaches it.
+
+   Pal_BuildBluePurple at 1000:3cac, six bands into g_PaletteBase:
+
+   +----------+-----+--------+----------+--------+-----------------+
+   | Indices  | Num | R      | G        | B      | Reads as        |
+   +==========+=====+========+==========+========+=================+
+   |   0.. 63 |  64 | 0      | 0        | n      | black -> blue   |
+   |  64.. 95 |  32 | n      | 0        | 0x3f   | blue -> purple  |
+   |  96..127 |  32 | 0x3f   | n        | 0x3f   | purple -> white |
+   | 128..159 |  32 | 0x3f   | n down   | 0x3f   | white -> purple |
+   | 160..191 |  32 | n down | 0        | 0x3f   | purple -> blue  |
+   | 192..255 |  64 | 0      | 0        | n down | blue -> black   |
+   +----------+-----+--------+----------+--------+-----------------+
+
+   The 32-entry bands step by 2 so they still cover 0..62.
+
+   NO ENTRY IN IT HAS R ABOVE B [verified by transcription], so
+   nothing in the palette can read as red or orange - R only ever
+   rises while B is already full, which gives purple. That is why the
+   demo shows this effect in blue, purple and a grey-white.
+
+   AND IT IS CYCLIC: index 0 and index 255 are both black. THE
+   SYMMETRY IS THE POINT. Section 2's whole mechanism is a mod-256
+   accumulator, so a palette whose ends did not meet would put a hard
+   edge at every wrap. This one runs out to white and back, so the
+   wrap is invisible and the bands read as smooth rings.
+
+6.  The transcription
+
+   src/xcursion/xcursion_moire.c is Xcur_MoireRender, with Xcur_Sin5
+   in xcursion_tables.c and the part's block as scene 9 of
+   xcursion_demo.c.
+
+   IT IS EXACT. Against a live run caught partway through a frame, the
+   accumulator at offset 0 is the C's 26th render and at offset 0x8000
+   its 25th - the split the in-flight row and column predict
+   [observed].
+
+   sim/xcursion/parts.py has sin5_at and interfere_render, and
+   sim/xcursion/demo.py part 21 is the effect; J resets the
+   accumulator so the squeeze can be watched from the start. The field
+   is the demo's accumulator and every term is the demo's; nothing
+   here is a stand-in.
+
+   The palette is Pal_BuildBluePurple's - section 5.
+
+7.  Open questions
+
+   o THE DEMO'S RENDER AND ANIMATION RATES ARE NOT EXACTLY 2 TO 1.
+     Measured on one frame of a live run: g_MoirePhase 0x32 is 25
+     renders while g_FadeLevel 0xf000 is 48 mode-7 passes, so the
+     ratio is 1.92 and not 2 [observed]. The two are clocked
+     independently - Timer_Isr increments a render counter every tick
+     and runs the animation on every other one - so the ratio is a
+     property of how long a frame takes on the machine, not of the
+     code. The reconstruction fixes it at 2, which costs about one
+     pass in fifty over this part.
+
+   o What follows at img 0x045d: Pal_BuildMain, g_AnimMode = 8 and a
+     pointer at img 0x98af set to 0x6a79. Not read.

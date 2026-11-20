@@ -1,0 +1,267 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                  LITHIUM: THE FLYOVER RUNNER'S FRAME
+
+
+Abstract
+
+   maybe_Scene_SurfaceFlyover at 1000:18a3, 828 bytes, reached from
+   Demo_Main at 1000:0262 once g_MusicPos reads 8, which is TICK
+   2356 - ../subsystems/music.txt section 5.4, ./transition.txt.
+   It is what scenes.txt calls scenes 2.5 to 2.9:
+   one loop, and the apparent cuts are the camera turning.
+
+   THIS DOCUMENT IS ONLY THE ASSEMBLY - which routines the runner
+   calls, in what order, and what its four slots are set to. Every
+   component has its own note and none of it is repeated here:
+   ./terrain.txt, ./flight.txt, ./tracks.txt, ./sky.txt,
+   ./trail.txt, ./text.txt, and ../subsystems/objects.txt for the
+   slot bank the whole scene is addressed through.
+
+Table of Contents
+
+   1. The frame, in order
+      1.1. The tick handler, in order
+   2. The four slots
+   3. Scene-wide state
+   4. What the port has
+      4.1. The flight path is exact for the whole scene
+   5. Open questions
+
+1.  The frame, in order
+
+   +------------+--------------------------------------------------+
+   | 1000:1a4a  | Obj_LoadOrientA(0)        the camera             |
+   | 1000:1a4d  | camera pos += 0x901f, ang += 0x9023              |
+   | 1000:1a64  | Obj_LoadOrientB(4), (8), (0xc)   the objects     |
+   | 1000:1a73  | g_VertPoolCount = 0                              |
+   | 1000:1a84  | Terrain_Build                                    |
+   | 1000:1aa7  | Mesh_Transform slot 4                            |
+   | 1000:1ad4  | Mesh_Transform slot 8                            |
+   | 1000:1b01  | Mesh_Transform slot 0xc                          |
+   | 1000:1b0e  | terrain scroll from the camera position          |
+   | 1000:1b42  | Scene_ProjectVerts, then Scene_DrawFacesReset    |
+   | 1000:1b50  | maybe_Sky_DrawPoint, if 1000:8f5a is set         |
+   | 1000:1b53  | Sky_SunAndStars                                  |
+   | 1000:1b56  | Flare_Render                                     |
+   | 1000:1b5e  | Trail_Draw                                       |
+   | 1000:1b61  | Text_DrawStringAt x4                             |
+   +------------+--------------------------------------------------+
+
+   THE TERRAIN SHARES THE VERTEX POOL WITH THE MESHES. 1000:1a73
+   resets the count and Terrain_Build runs before all three
+   transforms, so a port must size one pool for both.
+
+   1.1.  The tick handler, in order
+
+      Tick_SurfaceFlyover at 1000:639e, installed at 1000:1a35.
+
+      +------------+-----------------------------------------------+
+      | 1000:639e  | Flicker_Step - ./flicker.txt                  |
+      | 1000:63a1  | g_CamVel -= 0x55, clamped at 0                |
+      | 1000:63b4  | g_CamTurn -= 4, clamped at 0                  |
+      | 1000:63c3  | g_RecordMode = 0                              |
+      | 1000:63c9  | Track_Play and Flight_Step, slots 0, 4, 0xc   |
+      | 1000:63e3  | g_FlareEnergy eased a quarter to g_SunVisible |
+      | 1000:63f8  | Trail_Step                                    |
+      | 1000:63fb  | the credit roll - ./text.txt 7.2              |
+      | 1000:6c8e  | JMP Tick_Default                              |
+      +------------+-----------------------------------------------+
+
+      THE CAMERA COASTS TO A STOP. Both rates decay to zero and
+      nothing restores them, so the opening push is all the scene gets
+      and everything after it comes out of Flight_Step.
+
+   THE SCROLL IS DERIVED, NOT STORED. 1000:1b0e masks the camera's x
+   and y to 0xfff and shifts right 4, giving 0 to 255 - so the
+   heightmap wraps every 4096 world units and the surface is endless.
+
+2.  The four slots
+
+   +-------+----------+----------+-------+--------------------------+
+   | slot  | 0x89c9   | 0x8a01   | track | mesh                     |
+   +=======+==========+==========+=======+==========================+
+   | 0     | 0x24000  | 0x0a000  | 0x7aca| none - the camera        |
+   | 4     | 0x40000  | 0x0a000  | 0x74fd| 0x4000 scale 0x10, map   |
+   | 8     | 0x40000  | 0x6c000  | none  | 0x4b7c scale 0x0a, attr 0|
+   | 0xc   | 0x40000  | 0x64c00  | 0x809a| 0x4000 scale 0x10, map   |
+   +-------+----------+----------+-------+--------------------------+
+
+   The mesh headers settle what these are [verified, read at
+   1e5f:off]:
+
+       0x4000   34 vertices,  64 faces    img 0x125f0
+       0x4b7c  664 vertices, 1323 faces   img 0x1316c
+
+   SO SLOTS 4 AND 0xc ARE THE SAME SMALL MESH under the sphere map at
+   0x6ad2 - the two starships of scenes.txt 2.9 - and slot 8 is one
+   large mesh drawn with FACE ATTRIBUTE ZERO rather than a texture
+   segment, which is the tower. Slot 8 is also the only one the tick
+   handler never updates, so the tower does not move.
+
+   Slot 0xc starts with 0xf800 in 0x8c3b, 0x8bb1 and 0x8b27; slots 8
+   and 0xc carry 0x3800 and 0x5dc in both 0x8c69 and 0x8d49.
+
+3.  Scene-wide state
+
+   1000:19d9 sets g_PalSource to 0x99be, so THE FLYOVER DRAWS A
+   STORED PALETTE and not the animated one. Its tick handler never
+   calls Pal_Animate, so the ramps that carry the opening are simply
+   absent here and the colour is whatever the image holds
+   [verified].
+
+   1000:19e0 sets g_DepthNear to 0x1fbd, against the opening's
+   0x186a. 1000:19ea resets g_EnvMapAngle, which only the opening had
+   advanced. 1000:1a3c sets g_ObjAxisSwap, as the opening also does -
+   ./rockintro.txt section 6.1.
+
+   1000:19f6 fills the BACK buffer with 0x80, which is past the 128
+   entries Pal_Animate maintains, so the backdrop follows g_PalFade
+   alone - white while it is positive, black by the time it reaches
+   zero. That is the white the transition hands over.
+
+4.  What the port has
+
+   THE SCENE IS WIRED AND DRAWING: the four slots, the camera's
+   decaying push, Track_Play and Flight_Step on slots 0, 4 and 0xc,
+   Terrain_Build, the three Mesh_Transforms, the projection, the cull
+   and the fill, presented the way 1000:1bc8 presents it.
+
+   WHAT MATCHES. The pool comes out at 389 vertices and 676 faces
+   against the demo's 336 to 391 and 600 to 684 over the same stretch
+   [verified], and the heightmap is byte-identical - ./terrain.txt
+   section 5.
+
+   TWO TEXTURES AND THE PORT HAS BOTH. 1000:1a7d points the grid at
+   segment 0x5ad2 - the glow noise, ./terrain.txt section 6 - and
+   1000:1aaa points the ships at 0x6ad2, the sphere map. Drawing the
+   terrain with the sphere map is what a port does for want of the
+   first, and it shows at once: a sphere map holds nothing above
+   0x7f, so the back buffer's mean comes out at 28 against the
+   demo's 158.
+
+   THE SKY, THE FLARE AND THE CREDITS ARE IN and all three are
+   byte-exact against the demo's own back buffer - ./sky.txt section
+   7, ./text.txt section 7.
+
+   THE FACE ATTRIBUTE IS WHAT COLOURS THEM APART. 1000:1aaa, 0x1ad7
+   and 0x1b04 give the two ships 0x6ad2 and THE TOWER ZERO, which is
+   the same sphere map with 0x40 added to every texel -
+   ../subsystems/raster.txt section 3.3. A port that draws every face
+   plain has the tower in the ships' palette ramp.
+
+THE CRAFT HAVE A SHADOW, AND IT IS A SECOND PASS OVER THE TERRAIN'S
+   OWN FACES - not a fourth object. Nothing in the pool is anything but
+   terrain, ship and tower: a face census at a measured frame reads
+   1,323 with attribute 0, 624 with 0x5ad2 and 128 with 0x6ad2, which
+   is exactly the 2,075 faces the counter holds [verified]. Nor does
+   anything after the geometry darken the ground - between
+   Sky_SunAndStars and the present not one pixel falls.
+
+   IT IS THE PLANAR PASS, ../subsystems/raster.txt section 3.3, and
+   that is why neither test found it: the pass re-draws the SAME
+   terrain faces a second time, inside the one Scene_DrawFaces call,
+   so it adds no faces and happens before the geometry is finished.
+   A static silhouette of the craft, subtracted from the surface it
+   is projected onto. Watched at one pixel, the three writes in a
+   frame are the 0x80 refill, the terrain texel, and the subtraction
+   [verified].
+
+   THE THREE MODELS ARE PLACED CAMERA-RELATIVE by Mesh_Transform's
+   own last two terms, which read g_SlotPosX and g_SlotPosZ at slot 0
+   - ../subsystems/mesh3d.txt 3.2. At tick 3417 that puts all 34 of
+   the lead ship's vertices on screen as a 47 by 61 craft against the
+   demo's 48 by 55 at the same tick [verified]; left at zero it puts
+   them 1,030,000 deep, past g_DepthFar, and they are not drawn at
+   all.
+
+   THE POOL IS THE SUM, NOT THE LARGEST MODEL. At a measured tick the
+   flyover's pool holds 1,114 vertices and 2,107 faces - 656 terrain,
+   128 ship, 1,323 tower - so a projection or sort array sized for
+   one mesh is too small by half and Mesh_Transform's own bound drops
+   the tower with nothing said. That answers what the worst case is:
+   terrain plus all three models at once.
+
+   THE PROJECTION TAKES THE SUB-CELL REMAINDER, NOT THE POSITION.
+   Terrain_Height picks its map cell with the camera shifted down
+   0xc, so the grid is built centred on the camera; what 1000:1b0e
+   then hands Scene_ProjectVerts is only the camera masked to 0xfff
+   and shifted down 4. Passing the absolute position throws the whole
+   scene off screen, which is how this was found.
+
+   The entry itself is unchanged: lithium_demo.c selects 0x99be and
+   fills the screen the way 1000:19f6 fills the back buffer, and the
+   fade walks the white away - ./transition.txt section 2.
+
+   THE THREE MESHES NEED NO NEW PIPELINE. 34 and 664 vertices and 64
+   and 1323 faces fit the existing pool, and Mesh_Transform, the
+   projection, the cull and Poly_Fill are already byte-exact against
+   the emulator for the opening - ../README.txt section 10. What
+   gates them is Flight_Step and Terrain_Build.
+
+4.1.  The flight path is exact for the whole scene
+
+   Every slot field the reconstruction carries agrees with the
+   emulator's, bit for bit, AT THE SAME TICK NUMBER - no offset -
+   from the scene's first tick to 1,600 ticks in, by
+   which point the camera has travelled the length of the shot. That
+   covers the camera and the lead craft: position, flown position,
+   the two track accumulators, the attitude, both angle sets, the
+   command, the throttle and the speed [verified].
+
+   WHAT A SNAPSHOT MEASURES IS A FRAME, NOT A TICK. g_SlotAngle* and
+   g_SlotPos* are rewritten twice in every frame - Obj_LoadOrientA
+   reloads them from the slot and 1000:1a4d then adds the two
+   decaying camera rates - so a snapshot taken mid-frame holds the
+   angle from BEFORE that tick's Flight_Step. Comparing those live
+   copies against a port that samples at a tick boundary shows an
+   angle error of one ease step, around 30 to 50 units, on a model
+   that agrees exactly. The copies to compare are the ones the
+   flight model owns and leaves standing between ticks:
+   g_SlotHome* for position, g_SlotAngleA* for the camera and
+   g_SlotPitch and g_SlotYaw for a flown craft.
+
+   THERE ARE NO ENGINE TRAILS IN THIS SCENE, so the call to
+   Trail_Draw at 1000:1b5e draws nothing and the port omits it.
+   g_TrailActive gates both trail routines, nothing arms it but
+   Trail_Spawn, and Trail_Spawn is reached only from Flight_Step's
+   weapon tail when a track issues command 0x19 - which no slot
+   here ever does. Measured: the flag is never written across the
+   whole scene and the entry's clear at 1000:1a0c leaves the ring
+   empty [verified]. ../effects/trail.txt section 1.
+
+   THE SCENE STARTS ON THE SAME TICK AS THE ORIGINAL'S. The entry
+   waits on g_MusicPos >= 8 and that word is the order-list cursor,
+   so the gate fires at tick 2356 on both sides; the fade to black
+   has finished 176 ticks earlier. Reading the cursor as the entry
+   playing put the cue 192 ticks early, which left the fade still
+   running when it arrived and delivered the scene 17 ticks after
+   the port's own boundary - ../subsystems/music.txt section 5.2.
+
+   THE SHADOW ORIGIN IS THE ONE FIELD THAT STILL DIFFERS, and the
+   whole of it is g_FocusEased: 1000:32f1 eases that toward the
+   ground under the craft ONCE A FRAME while everything else above
+   runs once a tick. How far apart those two are is a property of
+   the machine, so this is the one field whose error moves with the
+   emulated CPU - 1 to 7 units at 120,000 cycles against 13 to 49 at
+   35,000 - and the only one that cannot be closed without
+   reproducing a particular draw cost. ../subsystems/raster.txt
+   section 3.3.
+
+5.  Open questions
+
+   o WHETHER THE SHADOW'S SIZE CAN CHANGE AT ALL. The stencil is
+     static and the projection's scale is the fixed >> 3, so its
+     extent in WORLD units never varies; what the altitude moves is
+     its OFFSET from the craft. An observer reports it growing as a
+     craft climbs, which that account does not predict, so one of the
+     two is incomplete.
+
+   o maybe_Sky_DrawPoint 1000:414d, which 1000:1b50 calls only when
+     1000:8f5a is set. Nothing seen so far sets it.
+
+
+   o Which of the transition's two loaded meshes is which object is
+     now answered - 0x4000 is the ship and 0x4b7c the tower - but
+     0x72f8, loaded at startup and 35 vertices, still has no scene.

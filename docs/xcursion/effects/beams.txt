@@ -1,0 +1,216 @@
+PCDEMOS 64k                                            Analysis Note
+
+
+                      EXCURSION: THE BEAMS
+
+
+Abstract
+
+   Beams_Render at 1000:317a and its runner Beams_Run at 1000:260f -
+   parts sync 0x28 and sync 0x29.
+
+   Rotating parallel stripes of light, produced by FEEDBACK rather
+   than by drawing: the screen is its own state, and each pixel is
+   pushed toward bright or dark depending on two bits of a plane
+   equation.
+
+   IT IS NOT A ROTOZOOM, which is what the opening lines look like.
+   There is no texture and no source image anywhere in the routine.
+
+Table of Contents
+
+   1. The misread worth recording
+   2. The plane equation
+   3. The two-bit test
+   4. Feedback, and the fixed point
+   5. The register trick
+   6. The two parts
+   7. The transcription
+   8. The palette
+   9. Open questions
+
+1.  The misread worth recording
+
+   Beams_Render opens with exactly the same four operations
+   Roto_Render does:
+
+       ECX = g_RotoZoom
+       BX  = g_RotoAngle & 0x7fc
+       bp  = (sin * zoom) >> 8
+       si  = (cos * zoom) >> 8
+
+   and it uses the same two globals, which the same animation handlers
+   drive. On that evidence it reads as a second rotozoom.
+
+   IT IS NOT ONE. Roto_Render sets ES to the 256x256 texture at
+   segment 0x2a79 and samples it; Beams_Render sets DS to 0xA000 and
+   ES to the work buffer and never reads a texture at all. The sin and
+   cos pair is being used as a ROTATED GRADIENT, not as a sampling
+   step.
+
+   The giveaway is which segments a routine loads, not which maths it
+   starts with.
+
+2.  The plane equation
+
+   bp becomes the per-column step and si the per-row step of one
+   16-bit accumulator [verified]:
+
+       img 31b3   the start is -(160*bp + 100*si), built from shifts:
+                  si*4 + si*32 + si*64 is 100*si, and bp*32 + bp*128
+                  is 160*bp
+       img 31d3   per row,    dx += si  then bx = dx
+       img 31ee   per column, bx += bp
+
+   which is
+
+       bx = (x - 160) * bp + (y - 100) * si     mod 0x10000
+
+   SO bx IS ZERO AT THE SCREEN CENTRE, and the 16-bit wrap is what
+   turns a single plane into a repeating pattern.
+
+   The period in pixels is 0x10000 / step, and with g_RotoZoom between
+   0x40 and 0x100 the step runs to 0xfff, so [verified by
+   transcription]:
+
+       +-------------+------------------+
+       | g_RotoZoom  | stripe period    |
+       +=============+==================+
+       | 0x40        | 64 px            |
+       | 0xa0        | 28 px            |
+       | 0x100       | 16 px            |
+       +-------------+------------------+
+
+3.  The two-bit test
+
+       img 31da   TEST BX, 0xC000
+
+   Only the top two bits are looked at. They are clear for exactly one
+   quarter of a 16-bit range, so A QUARTER OF EACH STRIPE PERIOD IS
+   THE BRIGHT BAND and three quarters are ramping down. Measured on
+   the transcription: 25 per cent of pixels in the bright band, with
+   another five or so per cent still above half brightness in the
+   trail behind it.
+
+   Testing two bits rather than comparing against a constant is why
+   the duty cycle is a quarter and not something tunable. It is not a
+   parameter anywhere.
+
+4.  Feedback, and the fixed point
+
+       bright, img 31f9:   pixel = (pixel + 0x3f) >> 1
+       dark,   img 31e0:   pixel -= 4, and values below 4 are left
+                           alone
+
+   The bright rule converges exponentially; the dark rule is linear.
+   So a stripe lights up fast and decays slowly, which is what leaves
+   a trail behind the sweep.
+
+   (x + 0x3f) >> 1 HAS ITS FIXED POINT AT 62, NOT 63: (62 + 63) >> 1
+   is 62. The bright band therefore saturates one short of the band
+   top, exactly the way Pal_BuildMain's ramps stop one short of the
+   DAC maximum - see subsystems/palette.txt section 2.
+
+   Every write goes to BOTH DS, which is 0xA000, and ES, which is the
+   work buffer, img 0x31e9 and 0x31eb. The work buffer is the state
+   and the screen is a copy, WHICH IS WHY Beams_Run HAS NO
+   Vga_Present. It is the only renderer in the demo that writes the
+   framebuffer and keeps its own history there.
+
+5.  The register trick
+
+   img 0x31d1 sets AH = 0xc8 as the ROW COUNTER and the loop body uses
+   AL as the pixel. Nothing in the body touches AH, and
+
+       img 31fe   SHR AL, 1
+
+   is a byte shift precisely so the row counter above it survives.
+   Writing `shr ax, 1` would destroy the loop. The same applies to
+   `add al, 0x3f` at img 0x31fc, which cannot carry into AH because AL
+   is at most 0x3f going in.
+
+6.  The two parts
+
+   The script changes the sweep and the three palette phases, and
+   NOTHING CLEARS THE WORK BUFFER BETWEEN THEM [verified] - img 0x083e
+   clears all 64 KB of it before the first part and the second part
+   has no clear of its own, so sync 0x29 starts from sync 0x28's
+   trails:
+
+       img 081c   phases 0x400, 0x400, 0x400
+       img 0855   g_RotoAngleRate = +0x20     then sync 0x28
+       img 086c   phases 0xff80, 0xf980, 0xf680
+       img 0881   g_RotoAngleRate = -0x20     then sync 0x29
+
+   SO THE BEAMS SWEEP ONE WAY AND THEN BACK. A full turn is
+   0x800 / 0x20 = 64 ticks, 0.64 s at g_Speed 100 - fast.
+
+   Meanwhile the mode 0xf handler at img 0x15c4 bounces g_RotoZoom
+   between 0x40 and 0x100 by flipping g_RotoZoomVel to +4 below the
+   floor and -4 above the ceiling - a triangle wave, so the stripe
+   spacing breathes from 16 px to 64 px and back while they turn. See
+   subsystems/animation.txt.
+
+   img 0x084b zeroes g_RotoZoom before sync 0x28, so the first stripes
+   are infinitely wide and narrow in as the velocity ramps up.
+
+7.  The transcription
+
+   src/xcursion/xcursion_beams.c is Xcur_BeamsRender, with
+   Xcur_PalBuildRgbRamps in xcursion_pal.c and the two parts as scenes
+   18 and 19 of xcursion_demo.c.
+
+   THE PLANE IS EXACT. Checked against a paused demo 56 animation
+   ticks into the first part: the start value comes out 0x394 both
+   ways, the row accumulator 0xdea7 at row 168, and the plane 0x7c65
+   at column 218 of it [observed]. Mode 0xf agrees too - angle 0x700
+   and zoom 220 at that tick, the zoom being 4 * 55 with the velocity
+   starting from its image static of 0.
+
+   THE SCREEN DOES NOT FOLLOW FROM THAT, because it is feedback: every
+   pixel is a function of the whole history since the clear, so it
+   depends on HOW MANY RENDERS happened and at which angle. Beams_Run
+   waits a tick per render exactly as Roto_Run does, which would be
+   two renders an animation pass if a pass kept up - but a pass here
+   is 64000 pixels against the rotozoom's 16000, and it does not.
+   Measured: g_Speed 100, so 50 animation passes a second, against
+   about five video frames per render pass or 14 a second - ABOUT ONE
+   RENDER PER THREE AND A HALF PASSES, and that fraction is machine
+   speed rather than anything in the code.
+
+   src/ renders once a frame, which is one per two passes - the
+   nearest ratio its tick structure holds, and nothing is tuned to
+   close the rest of the gap. The visible consequence is trail length:
+   fewer renders per turn makes a longer, fainter trail behind each
+   stripe.
+
+   sim/xcursion/parts.py has beams_render and sim/xcursion/demo.py
+   part 18 is the effect with mode 0xf driving it. V reverses the
+   sweep, which is the only difference between the two parts.
+
+   THE PALETTE IS THE DEMO'S. Pal_BuildRgbRamps at 1000:3d1e, which
+   mode 0xf calls every tick, rebuilds indices 0 to 63 as three linear
+   ramps whose slopes are cosines of three phases advancing at 3, 7
+   and 9. pal_build_rgb_ramps transcribes it, so the beams drift
+   through colour exactly as the binary says and nothing here is a
+   stand-in.
+
+8.  The palette
+
+   Pal_BuildRgbRamps at 1000:3d1e writes the 64 entries the beams
+   paint, from g_PaletteBase at cs:0xc7a4 - exactly the 0 to 62 range
+   section 3 describes.
+
+   Each channel is a ramp whose slope is (cos(phase) + 0x1000) >> 5,
+   and the three phases advance at 3, 7 and 9 a tick, so the hue
+   combination never repeats quickly.
+
+   ONLY THE HIGH BYTE of each 16-bit accumulator reaches the palette,
+   img 0x3d78 - the same 8.8 trick as Glow_SpawnStep.
+
+9.  Open questions
+
+   o Nothing in src/ closes the render-rate gap in section 7, and
+     nothing should without a reason that is in the binary. If the
+     trails ever read as too short, that ratio is the first thing to
+     look at.

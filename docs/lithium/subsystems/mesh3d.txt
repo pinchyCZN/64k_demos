@@ -1,0 +1,268 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                      LITHIUM: THE 3D PIPELINE
+
+
+Abstract
+
+   How a model becomes a screenful. Mesh_Load reads it and
+   Mesh_Transform rotates it into two shared scene pools; raster.txt
+   is the other half, where those pools become pixels.
+
+   THE CHROME IS SPHERE MAPPING, and the whole trick is five
+   instructions wide: the vertex normal is rotated into view space,
+   shifted right by 0x11 and biased by +0x80, which lands it in a
+   256-wide texture centred on 128. effects/scenes.txt scenes 1, 2 and
+   14 are all this.
+
+   Everything here is [verified] from the routines unless marked.
+   formats/mesh.txt is the on-disk format; this is what runs.
+
+Table of Contents
+
+   1. The shape of it
+   2. The two scene pools
+   3. Mesh_Transform, step by step
+   4. The rotations and the sine table
+   5. The environment map
+   6. The per-object parameters
+   7. What happens next
+   8. Open questions
+
+1.  The shape of it
+
+       Mesh_Load         1000:503a   byte-packed model -> work records
+                                     and averaged per-vertex normals
+       Mesh_Transform    1000:4d2c   one model -> the two scene pools
+       Vec_RotZ          1000:35e1   rotate about Z
+       Vec_RotX          1000:362a   rotate about X
+       Vec_RotY          1000:3674   rotate about Y
+
+   A scene is built by setting the per-object parameters and calling
+   Mesh_Transform once per object. NOTHING IN IT CLEARS THE POOLS -
+   g_VertPoolCount and g_FacePoolCount only ever grow - so the clear
+   belongs to whatever drives a frame, and that has not been found.
+
+2.  The two scene pools
+
+   +--------------+---------+---------------------+---------------------+
+   | Pool         | Segment | Stride              | Index               |
+   +==============+=========+=====================+=====================+
+   | vertices     | 0x2ad2  | 16 bytes            | g_VertPoolCount     |
+   | faces        | 0x8ad2  | 8 bytes             | g_FacePoolCount     |
+   +--------------+---------+---------------------+---------------------+
+
+   A vertex record:
+
+       +0x00  word   x, view space
+       +0x02  word   y
+       +0x04  word   z
+       +0x06  word   not written here
+       +0x08  word   u, the env-map column
+       +0x0a  word   v, the env-map row
+       +0x0c  ..     not written here
+
+   A face record:
+
+       +0x00  word   vertex index 0, REBASED into the pool
+       +0x02  word   vertex index 1
+       +0x04  word   vertex index 2
+       +0x06  word   g_ObjFaceAttr, whatever the object sets
+
+   The rebasing is what makes the pools shared: each model's indices
+   have the pool position the model started at added to them, so one
+   draw pass can walk every face of every object.
+
+   SEGMENT 0x2ad2 IS ALSO MESH_LOAD'S WORK BUFFER. It is NOT the S3M
+   module's base, however close the numbers look: a segment written
+   S in the listing is image offset (S - 0x1000) * 16, so 0x2ad2 is
+   image offset 0x1ad20 and the module sits at 0x2ad20, 64 KB past
+   it. Measured by breaking at img 0x2e66, where Scene_ProjectVerts
+   has just loaded DS: it reads 0x1c77, and 0x1c77 less the 0x1a5
+   load base is image offset 0x1ad20. formats/mesh.txt section 5.
+
+3.  Mesh_Transform, step by step
+
+   3.1.  The cull
+
+      Before anything:
+
+          if |g_CurPosX - g_SlotHomeX| > 0x20000: return
+          if |g_CurPosZ - g_SlotHomeZ| > 0x20000: return
+
+      A box test on X and Z only, so Y is not culled. It returns
+      having appended NOTHING, which means a culled object does not
+      advance either pool index.
+
+   3.2.  The position
+
+          rotate Z by -(g_ObjAngleZ * 2)      then SAR 0xa
+          rotate X by -g_ObjAngleX            then SAR 0xa
+          rotate Y by -g_ObjAngleY
+          SAR by g_ObjScaleShift
+          x -= g_CurPosX >> 4
+          y -= g_CurPosY >> 4
+          z += g_CurPosZ >> 4
+          x += (g_SlotPosX >> 0xc) << 8
+          z += ((-(g_SlotPosZ + 1)) >> 0xc) << 8
+
+      Note the Z ANGLE IS DOUBLED and all three are NEGATED, and that
+      z is ADDED to where x and y are subtracted.
+
+      g_ObjScaleShift = 16 MAKES THE WHOLE CHAIN THE IDENTITY. Three
+      rotations by zero multiply by 4096 three times and two SAR 0xa
+      take 20 bits back off, leaving the coordinate shifted left by
+      16 - so a shift of 16 returns the authored byte exactly. Checked
+      against all five models [verified]. A shift of 0 instead wipes
+      the model: every coordinate is then a multiple of 0x10000 and
+      the word store keeps nothing.
+
+      THE LAST TWO TERMS ARE THE CAMERA, AND THEY ARE WHAT MAKES THE
+      PLACEMENT RELATIVE. g_SlotPosX and g_SlotPosZ are read AT SLOT
+      0, which every scene uses for its camera, so the object's own
+      position comes off and the camera's goes back on: the model
+      lands camera-relative without a view matrix anywhere.
+
+      THE ADD-BACK IS QUANTISED TO WHOLE 4096-UNIT CELLS by the
+      >> 0xc then << 8, and that cell is the one Terrain_Build is
+      centred on - so what Scene_ProjectVerts is handed as the camera
+      position is only the SUB-CELL REMAINDER, 1000:1b0e. The two
+      halves have to agree or nothing lines up.
+
+      READING THEM AS A FUDGE FACTOR IS THE TRAP, and it is a quiet
+      one. Left at zero, a model is drawn at its ABSOLUTE position,
+      which the three rotations then multiply by 64 - so a craft a few
+      thousand units out lands past g_DepthFar and simply is not
+      there, while one that happens to fall near the near plane
+      smears across the screen as a few long triangles. Neither looks
+      like a placement bug.
+
+      THE Z TERM'S NEUTRAL VALUE IS -1, NOT 0, because of the INC then
+      NEG - so a scene with no camera offset passes -1 and not zero.
+
+   3.3.  The normal, and the map
+
+      Section 5.
+
+   3.4.  The faces
+
+      Three words of vertex index, each with the model's pool base
+      added, then g_ObjFaceAttr. g_ObjMirror additionally swaps the
+      first and third index, which reverses the winding - consistent
+      with it also negating the map coordinates.
+
+4.  The rotations and the sine table
+
+   All three rotations have one form. For Vec_RotZ, with x in EAX, y
+   in EBX and z in ECX:
+
+       di  = g_RotAngleZ & 0x1ffc
+       sin = g_SinTable[di]
+       cos = g_SinTable[di + 0x800]
+       x'  = x*cos - y*sin
+       y'  = y*cos + x*sin
+       z <<= 0xc
+
+   Vec_RotX mixes y and z and shifts x; Vec_RotY mixes x and z and
+   shifts y. The untouched component is shifted left by 0xc so it
+   keeps the same scale as the two that were multiplied, and THE
+   PRODUCTS ARE LEFT AT FULL SCALE - a caller shifts them back itself,
+   which is why Mesh_Transform uses SAR 0xa for positions and SAR 0xc
+   for normals.
+
+   g_SinTable at 1000:a0b2 holds 2048 dword entries, a FULL period, at
+   12-bit fixed point so 4096 is 1.0. Hence:
+
+   o A FULL CIRCLE IS 2048 ANGLE UNITS, and the mask 0x1ffc both wraps
+     the angle and drops its low two bits, because the entries are
+     dwords.
+   o COSINE IS SINE 512 ENTRIES ON, which is +0x800 bytes and 90
+     degrees.
+   o The 512-entry copy at g_SinTable + 0x2000 IS A WRAP TAIL AND
+     NOTHING ELSE. An angle near the top indexes up to 2047 + 512 =
+     2559, and that tail is the only reason Demo_Main's first build
+     loop writes a third destination while the second loop writes two.
+
+   Demo_Main builds all of it from 512 quarter-sine words at img
+   0x1a535 - README.txt section 4.
+
+5.  The environment map
+
+   The normal goes through the same three rotations as the position,
+   with three differences:
+
+       SAR 0xc after each, not 0xa, so it keeps the table's scale
+       the Y angle is -g_ObjAngleY - 0x400, A QUARTER CIRCLE OFF
+       a FOURTH rotation about Z by g_EnvMapAngle follows
+
+   then SAR 0xb on x and y, g_ObjMirror negates both, and finally
+
+       u = (x >> 0x11) + 0x80
+       v = (y >> 0x11) + 0x80
+
+   THAT IS SPHERE MAPPING. A view-space normal used directly as a
+   texture coordinate reflects the same image regardless of where the
+   object is, which is what makes a surface read as chrome, and
+   g_EnvMapAngle turns the reflection without moving the model.
+
+   The scale is right, which is a check rather than an assumption: for
+   the 34-vertex model the coordinates come out spanning 22 to 217 and
+   70 to 242 [verified by transcription], so a normal sweeps most of a
+   256-wide texture and clips at neither end.
+
+   The quarter-circle offset on the Y angle is what aims the map: it
+   makes u follow the normal's X in a frame rotated 90 degrees from
+   the model's, so the highlight sits beside the viewer rather than
+   behind the object [inferred].
+
+   WHAT THE MAP ITSELF IS HAS NOT BEEN FOUND. No 64 KB texture of
+   anything sits in the image, and the palette is zero there too, so
+   both are built at run time. sim/lithium/ therefore draws u and v as
+   grey levels rather than looking anything up, and the banding it
+   shows is the map coordinate, not the map.
+
+6.  The per-object parameters
+
+   +----------------------+-------------------------------------------+
+   | g_MeshSrcOff         | the model, as an offset in segment 0x1e5f |
+   | g_MeshNrmOut         | its per-vertex normals, in segment 0x2ad2 |
+   | g_ObjAngleX, Y, Z    | orientation. Z is used doubled            |
+   | g_ObjScaleShift      | a right shift; 16 is the identity         |
+   | g_CurPosX, Y, Z      | subtracted from x and y, ADDED to z       |
+   | g_EnvMapAngle        | spins the reflection                      |
+   | g_ObjMirror          | negates u and v and reverses the winding  |
+   | g_ObjAxisSwap        | swaps y and z and negates y, on the       |
+   |                      | vertex AND the normal - a property of the |
+   |                      | model as authored                         |
+   | g_ObjFaceAttr        | goes into every face record at +0x06      |
+   +----------------------+-------------------------------------------+
+
+7.  What happens next
+
+   THE DRAW IS READ. raster.txt has it: Scene_ProjectVerts applies the
+   camera and the perspective divide, Scene_DrawFaces culls and sorts
+   and calls the fill once per face, Poly_Fill rasterises into an
+   off-screen buffer and Screen_Present blits the dirty rectangle.
+
+   Two things it settles about the records on this page. The vertex
+   record is REUSED, not copied - Scene_ProjectVerts writes the screen
+   position over the view-space x and y - and the face attribute that
+   Mesh_Transform copies in is A TEXTURE SEGMENT, with 0 and 1 reserved
+   to mean a palette band. raster.txt sections 3.3, 4 and 6.
+
+   Still missing: whatever clears the pools per frame, whatever drives
+   g_ObjAngle* and g_CurPos* per scene, the env-map texture itself,
+   and the palette.
+
+8.  Open questions
+
+   o Whether g_CurPos* is the camera or the object. The cull compares
+     g_CurPosX against g_SlotHomeX, which would make the first
+     the camera - but subtracting a camera position AFTER rotating is
+     only correct if the object's own position was already folded in.
+     The names say what the code does with them and no more.
+
+   o Why the Z angle is doubled while X and Y are not. If g_ObjAngleZ
+     is stored in 1024 units to the circle and the others in 2048,
+     that would explain it and is testable once something writes them.

@@ -1,0 +1,230 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                        LITHIUM: THE MESH FORMAT
+
+
+Abstract
+
+   How Lithium stores a 3D model, and what Mesh_Load at unpacked
+   1000:503a turns it into. All [verified] from the routine and from
+   parsing all five models the startup script loads.
+
+   A model is TINY: a word pair, three signed bytes per vertex, three
+   words per face. The tower is 664 vertices and 1,323 faces in 9,934
+   bytes, and there are ten models in 13 KB.
+
+   What Mesh_Load leaves behind is not the model but AVERAGED
+   PER-VERTEX NORMALS, which is Gouraud setup and is also what an
+   environment map needs.
+
+Table of Contents
+
+   1. Where the models are
+   2. The source format
+   3. What Mesh_Load builds
+   4. The ten models
+      4.1. Four of them are ball sizes, used at once
+   5. The work buffer sits on top of the music
+   6. Open questions
+
+1.  Where the models are
+
+   g_MeshSrcOff at 1000:8f70 holds an offset into SEGMENT 0x1e5f, the
+   asset segment, whose image offset is 0xe5f0 - that is 0x1e5f * 16
+   minus the 0x10000 load base Ghidra uses.
+
+   So a model at g_MeshSrcOff = 0x4000 begins at img 0x125f0. The
+   startup script stores the offset, then calls Mesh_Load, once per
+   model; section 4 lists the five it loads in its first 0x200 bytes.
+
+2.  The source format
+
+   Three parts, no padding and no magic [verified]:
+
+   +----------------+--------+-------------------------------------------+
+   | Offset         | Size   | What                                      |
+   +================+========+===========================================+
+   | +0x00          | word   | vertexCount                               |
+   | +0x02          | word   | faceCount                                 |
+   | +0x04          | 3 each | vertices: x, y, z as SIGNED BYTES         |
+   | after those    | 6 each | faces: three words of vertex index        |
+   +----------------+--------+-------------------------------------------+
+
+   So the whole model is 4 + 3*nv + 6*nf bytes, and a coordinate is a
+   signed byte - the models are authored in a box 256 units across.
+
+   THE INDICES ARE VERTEX NUMBERS, NOT BYTE OFFSETS. Mesh_Load shifts
+   each one left by 5 to reach a 32-byte work record, which is where
+   the stride comes from.
+
+3.  What Mesh_Load builds
+
+   Three passes. The first two write into segment 0x2ad2.
+
+   3.1.  Pass 1 - expand the vertices
+
+      Each vertex becomes a 32-byte record at 0x2ad2:0000 onward:
+
+          +0x00   dword   x, sign-extended from the stored byte
+          +0x04   dword   y
+          +0x08   dword   z
+          +0x0c   word    normal accumulator x
+          +0x0e   word    normal accumulator y
+          +0x10   word    normal accumulator z
+          +0x12   word    how many faces touch this vertex
+          +0x14   ..      unused by this routine
+
+      The accumulator and the count are zeroed here.
+
+   3.2.  Pass 2 - one face at a time
+
+      The centroid first, as the truncating integer mean of the three
+      vertices. Then the face normal, as the cross product
+
+          (v0 - centroid) x (v1 - centroid)
+
+      ONLY v0 AND v1 TAKE PART IN THE CROSS PRODUCT. v2 reaches the
+      result only through the centroid, which is not how a face normal
+      is usually computed and is worth not "fixing" when reading the
+      code.
+
+      The three components are stored as WORDS, so they truncate.
+
+      THE LENGTH COMES FROM A BRUTE-FORCE SEARCH, NOT A SQUARE ROOT.
+      ECX walks up from 0, keeping the closest ECX*ECX to the squared
+      length, and stops as soon as the error grows:
+
+          best = 0xffffffff; c = 0
+          while c < 0x4000:
+              d = abs(c*c - len2)
+              if d > best: break
+              best = d; c += 1
+          c += 1
+
+      THAT TRAILING INCREMENT IS LOAD-BEARING. It leaves c one or two
+      larger than the true root, which looks like an off-by-one and is
+      the thing that stops a degenerate face - three collinear
+      vertices, normal length zero - from dividing by zero. Removing it
+      to "correct" the normalisation introduces a crash.
+
+      The normal is then normalised to 11-bit fixed point as
+      (component << 11) / c, and ADDED INTO ALL THREE of the face's
+      vertices with 16-BIT ADDS, which can wrap. Each vertex's face
+      count is incremented.
+
+      The face record itself is 0xa bytes at g_MeshNrmOut, with the
+      three normal words at +0x04, +0x06 and +0x08.
+
+   3.3.  Pass 3 - average, over the top of the faces
+
+      For every vertex with a non-zero count, each accumulator word is
+      divided by the count and written out as a word.
+
+      THE FACE TABLE IS SCRATCH. Pass 3 restarts the output pointer at
+      g_MeshNrmOut and writes 6 bytes per vertex over the 0xa-byte face
+      records. Only the per-vertex normals survive the call, so the
+      face normals exist purely to be averaged.
+
+      A vertex no face references is left untouched, so it keeps
+      whatever the buffer held.
+
+4.  The ten models
+
+   The asset region is a CONTIGUOUS RUN OF TEN MODELS from img 0x125f0
+   to img 0x15aed with NO GAPS [verified; every one parses and every
+   one has a largest vertex index of exactly vertexCount - 1].
+
+   +------------+-----------+--------+--------+---------+---------------+
+   | g_MeshSrc  | img       | verts  | faces  | bytes   | used by       |
+   +============+===========+========+========+=========+===============+
+   | 0x4000     | 0x125f0   |     34 |     64 |     490 | battle,       |
+   |            |           |        |        |         | flyover       |
+   | 0x41ea     | 0x127da   |    130 |    256 |   1,930 | rock scenes   |
+   | 0x4974     | 0x12f64   |     10 |     16 |     130 | the finale    |
+   | 0x49f6     | 0x12fe6   |     10 |     16 |     130 | the finale    |
+   | 0x4a78     | 0x13068   |     10 |     16 |     130 | the finale    |
+   | 0x4afa     | 0x130ea   |     10 |     16 |     130 | the finale    |
+   | 0x4b7c     | 0x1316c   |    664 |  1,323 |   9,934 | tower falling |
+   | 0x724a     | 0x1583a   |      4 |      4 |      40 | battle - the  |
+   |            |           |        |        |         | projectiles   |
+   | 0x7272     | 0x15862   |     11 |     16 |     132 | tower falling |
+   | 0x72f8     | 0x158e8   |     35 |     68 |     517 | battle, tower |
+   +------------+-----------+--------+--------+---------+---------------+
+
+   The startup script loads only five of them; the scenes load their
+   own, which is why the other five are reachable only through a scene
+   runner - ../effects/scenes.txt section 5.
+
+   The 4-vertex, 4-face model is a tetrahedron, the right shape for a
+   bolt or a particle and the wrong shape for anything else.
+
+   4.1.  Four of them are BALL SIZES, used at once
+
+      0x4974, 0x49f6, 0x4a78 and 0x4afa are 130 bytes each, spaced
+      exactly 0x82 apart, and THEY SHARE AN IDENTICAL FACE LIST - the
+      same 16 faces over the same 10 vertices, with only the positions
+      differing [verified by comparison].
+
+      THEY ARE NOT KEYFRAMES. The figure's fifteen joints each name
+      one of the four, and several name different ones, so all four
+      are on screen in the same frame - ../effects/figure.txt section
+      4. They are the same blob at different radii: mean distance from
+      the centroid is 26.8 for the first, which the limbs use, against
+      16.9 for the second, which the hands and feet use.
+
+      Each gets its own normal buffer, g_MeshNrmOut 0x8000, 0x83e8,
+      0x87d0 and 0x8bb8, so Mesh_Load runs once per ball at startup
+      and all four sets of per-vertex normals exist together.
+
+      Identical topology with displaced vertices WOULD also be the
+      shape of a morph target, and nothing in the format distinguishes
+      the two uses - the distinction is in how the joints reference
+      them.
+
+5.  The work buffer sits on top of the music
+
+   Segment 0x2ad2 is linear 0x2ad20, which is img 0x1ad20 - AND THAT IS
+   EXACTLY THE S3M MODULE'S BASE [verified; the two addresses are the
+   same byte].
+
+   So Mesh_Load's vertex records are written straight over where the
+   module sits in the image. Since both plainly work, the module must
+   be read out of there and relocated before the first Mesh_Load call,
+   and the space then reused [inferred].
+
+   That ordering holds in the startup script: Snd_SetMixRate runs at
+   1000:01b2 and the first Mesh_Load at 1000:01c6.
+
+   THIS IS THE BEST LEAD ON THE MISSING SAMPLES. README.txt section 6
+   records that the module's sample data is not in the image in any
+   form - not PCM, not 4-bit packed, not delta-encoded, and 20 KB of it
+   is simply zero. Whatever moves the module out of 0x2ad2:0000 is the
+   code that would also have to produce them.
+
+6.  Open questions
+
+   o The rasteriser. The TRANSFORM is now read - Mesh_Transform at
+     1000:4d2c, in subsystems/mesh3d.txt - so what is left between a
+     model and the screen is the perspective divide, the sort and the
+     polygon fill.
+
+   o What the face record's +0x00 to +0x03 holds. Pass 2 never writes
+     it and pass 3 overwrites it.
+
+   o The remaining 520-byte gap after 0x41ea. The 134-byte one turned
+     out to be the sixth model, so this may be a seventh.
+
+   o Whether 0x7272 is a ring. It is the model the tower fall
+     TOPPLES - slot 0x10, sphere-mapped, driven by Flight_StepRoll -
+     while the 664-vertex 0x4b7c at slot 8 never moves. The impact
+     counter reaches three before the camera shake, so the small
+     model is toppled three times, which fits three rings coming off
+     a tower that stays put [inferred]. ../effects/towerfall.txt.
+
+   o Why only v0 and v1 enter the cross product. It gives a normal
+     perpendicular to the plane through the centroid and those two
+     vertices, which for a triangle is the face plane - so it may
+     simply be a cheaper spelling of the same thing. Worth checking
+     against a case where the three vertices are not symmetric about
+     the centroid.

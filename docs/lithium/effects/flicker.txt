@@ -1,0 +1,107 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                       LITHIUM: THE FLICKER
+
+
+Abstract
+
+   A 256-entry smoothed random walk, rebuilt every tick, that the
+   lens flare reads to make each pixel of its sprite twinkle on its
+   own phase - effects/sky.txt section 6.
+
+   IT IS A DIFFUSION, NOT NOISE. Each entry becomes the mean of
+   itself and its neighbour plus a small jitter, so the table stays
+   smooth while drifting, and a sprite indexed through it shimmers
+   rather than hissing.
+
+   The table lives in the CODE SEGMENT, four bytes past the end of
+   g_PolyArgs.
+
+   All [verified] from Flicker_Step unless marked.
+
+Table of Contents
+
+   1. Flicker_Step
+   2. The clamp is a palette band
+   3. Who reads it
+   4. Open questions
+
+1.  Flicker_Step
+
+   1000:6065. Called by all three track handlers, so it runs every
+   tick of every scene that moves an object.
+
+       bp = g_RndState0,  si = g_RndState1    KEPT, see below
+       di = g_FlickerTable at CS:0xe1e6
+       dx = [di]                              keep the first entry
+       g_RndState0 += dx*2 + 0x602d
+       g_RndState1 += (that)*2 + 0x602d
+       ax = dx
+       255 times:
+           ax = (ax + [di+2]) >> 1            THE RUNNING VALUE
+           ax += (Rnd_Next + 0x800) >> 0xc    a small signed jitter
+           clamp ax into 0 .. 0x40
+           [di] = ax
+           di += 2
+       [di] = the saved first entry           so the table WRAPS
+       g_RndState0 = bp,  g_RndState1 = si    RESTORED
+
+   THE LEFT NEIGHBOUR IS ALREADY UPDATED. The running value stays in
+   AX across the loop, so an entry is the mean of the NEW entry below
+   it and the OLD entry above - a forward pass, not a symmetric
+   average over the previous table. It is still one-dimensional
+   diffusion: neighbouring entries stay close, so anything indexing
+   the table with a smoothly varying value gets a smoothly varying
+   result.
+
+   Writing the saved first entry back into the last slot closes the
+   table into a ring, so an index that wraps sees no discontinuity -
+   and the index IS an angle, which is why it has to.
+
+   IT LEAVES THE GENERATOR EXACTLY AS IT FOUND IT. 1000:60bf writes
+   back the pair loaded at 1000:6065, so the perturbation it makes
+   from its own contents AND all 255 draws are undone. The walk is
+   invisible to every other consumer of the stream - the dust jitter,
+   the starfield shade, the shatter velocities - and a transcription
+   that lets it advance the generator moves all of them.
+
+2.  The clamp is a palette band
+
+   The range 0 .. 0x40 is not arbitrary. A pixel in this demo is a
+   6-bit index inside a 64-entry band selected by its top two bits -
+   subsystems/raster.txt section 4 - so an entry can be used as an
+   intensity within a band and can never push a pixel out of it.
+
+   Flare_DrawSun relies on exactly that: it subtracts a table entry
+   from the sprite value and the result stays inside one band's worth
+   of brightness.
+
+3.  Who reads it
+
+   Flare_DrawSun at 1000:4754, through a second source plane:
+
+       dh = ES:[si + 0x4600]
+       di = g_FlickerTable[dh] - ax + 0x40,  floored at 0
+
+   THAT PLANE IS AN ANGLE MAP around the sun - effects/sky.txt 6.3 -
+   so the walk is indexed by angle and the glare shimmers in sectors
+   rather than per pixel. Because the walk is smooth in its index,
+   neighbouring sectors twinkle together; because an angle wraps, the
+   ring closure above is load-bearing rather than tidy.
+
+   IT IS READ FROM THE FRAME AND WRITTEN FROM THE INTERRUPT, so the
+   sun's disc is drawn partly with one table and partly with the
+   next - effects/sky.txt 6.4.
+
+   Ported as Lith_FlickerStep, src/lithium/lithium_flare.c.
+
+   Flare_BuildSprite seeds the table at 1000:54f5, before any of this
+   runs: one draw sets a starting value and 256 more walk it, clamped
+   the same way. THAT one does advance the generator.
+
+4.  Open questions
+
+   o Whether anything but the flare reads it. The table is rebuilt
+     every tick by all three track handlers, which is more work than
+     one effect needs.

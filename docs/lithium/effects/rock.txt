@@ -1,0 +1,138 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                    LITHIUM: THE ROCK IN THE TUNNEL
+
+
+Abstract
+
+   The chrome rock that hangs in the tunnel after the glass breaks,
+   tumbles, and drifts away behind the camera.
+
+   IT IS IN maybe_Scene_BumpShatter, NOT maybe_Scene_Tunnel. Phase
+   four of that runner draws THREE things a frame - the tunnel, the
+   glass shards still flying, and the rock - so the tunnel and the
+   rock really do share a shot. The separate tunnel scene at
+   1000:040b has no mesh in it at all.
+
+   NOTHING ABOUT THE ROCK IS INTEGRATED EXCEPT ITS RETREAT. Its
+   position is three sine lookups at three rates and its orientation
+   is three counters at three more, so six constants describe the
+   whole performance.
+
+   All [verified] from the four routines.
+
+Table of Contents
+
+   1. Phase four draws three things
+   2. Tick_Rock
+   3. Obj_WobblePos, the Lissajous
+   4. The retreat
+   5. Open questions
+
+1.  Phase four draws three things
+
+   maybe_Scene_BumpShatter, from img 0x09d5, once a frame:
+
+       Dirty_Reset
+       Obj_LoadOrientA(0)                  the camera, from slot 0
+       g_VertPoolCount = 0
+       g_ObjFaceAttr = 0x6ad2
+       Tunnel_Build                        THE TUNNEL
+       the camera's coarse/fine split
+       Scene_ProjectVerts;  Scene_DrawFaces
+       Shatter_Draw                        THE GLASS, still flying
+       ZERO the camera position AND all three camera angles
+       Obj_Select(4)                       THE ROCK, slot 4
+       g_MeshSrcOff = 0x41ea;  scale 0x10;  texture 0x6ad2
+       Mesh_Transform;  Scene_ProjectVerts;  Scene_DrawFaces
+       Screen_PresentDirty;  Demo_PollKeys
+   until g_SlotHomeZ[slot 4] < -0xfa0
+
+   THE CAMERA IS ZEROED BEFORE THE ROCK IS DRAWN, at img 0x0a2e to
+   0x0a6e - both the position and the three angles. So the rock is
+   rendered in a camera-less frame, at whatever Obj_Select handed
+   Mesh_Transform, while the tunnel around it was drawn through the
+   flying camera. That is why it sits in the middle of the view
+   instead of sweeping past with the walls.
+
+   The mesh is 0x41ea, 130 vertices and 256 faces - ../formats/
+   mesh.txt section 4 - under the sphere map, so it is chrome.
+
+2.  Tick_Rock
+
+   1000:6b35, installed at img 0x0957.
+
+       si = 4
+       Obj_WobblePos
+       g_SlotAngleX += 0x24     } the TUMBLE - Obj_Select hands
+       g_SlotAngleY += 0x0f     } these to Mesh_Transform
+       g_SlotAngleZ += 0x2b     }
+       g_SlotPitch  += 0x45     } the PATH - Obj_WobblePos
+       g_SlotYaw    += 0x24     } samples the sine table with
+       g_SlotRoll   += 0x36     } these
+       g_SlotHomeZ -= (g_SlotHomeZ + 0x4e20) >> 8
+       g_RockSlideX -= 4
+       Shatter_Step
+
+   SIX RATES, TWO JOBS. One set of three spins the mesh and the other
+   walks the Lissajous, and nothing couples them - which is why the
+   rock tumbles on one schedule and wanders on another.
+
+   It also steps the shatter, so the glass is still in flight while
+   the rock is on screen.
+
+   IT HAS NO RET. Tick_Rock is 0x4a bytes and ends at 1000:6b7f,
+   which is Tick_Tunnel's first instruction, so the handler this
+   phase installs is BOTH BODIES. That is where the camera's motion
+   along the bore comes from, and where the ring window advances -
+   effects/tunnel.txt section 5. Reading Tick_Rock as a complete
+   handler leaves the tunnel static and the eye outside it.
+
+3.  Obj_WobblePos, the Lissajous
+
+   1000:6008.
+
+       g_SlotPosX = (g_SinTable[g_SlotPitch & 0x1ffc] >> 2)
+                    + g_RockSlideX
+       g_SlotPosY =  g_SinTable[g_SlotYaw   & 0x1ffc] >> 2
+       g_SlotPosZ = (g_SinTable[g_SlotRoll  & 0x1ffc] >> 1)
+                    + 0x1f40 + g_SlotHomeZ
+
+   THE POSITION IS SAMPLED, NOT INTEGRATED. Three angles index one
+   table at three rates, so the rock traces a Lissajous around a
+   point 0x1f40 in front of the origin. There is no velocity and no
+   acceleration.
+
+   THE Z LOOKUP IS SHIFTED ONE BIT LESS than the other two, so the
+   wobble is twice as deep along the view axis as it is across it.
+
+   g_RockSlideX drains by 4 a tick, so the whole figure also slides
+   sideways as the shot runs.
+
+   NOTHING EVER FILLS IT. Tick_Rock drains it by 4 and Tick_Dust by
+   0x20, both guarded so they floor at zero, and no path writes it
+   otherwise - so it holds the 0x2ee0 the image loads with at
+   1000:8ff9 until the bump scene starts spending it, which is what
+   times that scene's crossover. effects/bump.txt section 5.
+
+   Tick_Dust calls the same routine for the dust's launch point.
+
+4.  The retreat
+
+       g_SlotHomeZ -= (g_SlotHomeZ + 0x4e20) >> 8
+
+   AN EXPONENTIAL EASE WITH ITS FIXED POINT AT -0x4e20. Each tick z
+   moves a 256th of the way toward -20000, so the rock creeps away at
+   first and accelerates as it goes - and because the step is
+   proportional to the distance remaining, it never arrives.
+
+   Phase four ends when z passes -0xfa0, img 0x0ac2. The rock is
+   behind the camera by then and is not drawn again.
+
+5.  Open questions
+
+   o Where g_SlotHomeZ[slot 4] starts. Nothing in the runner writes
+     it - Obj_Reset at img 0x0966 is called for slot 0 only - so the
+     rock begins wherever the previous scene left it, and how long it
+     lingers depends on that value.

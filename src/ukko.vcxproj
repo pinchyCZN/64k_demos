@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- UKKO - the SDL2 target. One demo per executable: the hosts plus
+     this demo's sources. DRAIN and LITHIUM get their own vcxproj in
+     this same directory and share main_sdl.c and main_ppm.c.
+
+     NO CMAKE, deliberately. This file is hand written and tracked;
+     tools/build_web.sh is the other build and neither generates the
+     other. A generated solution is one you cannot edit and keep. -->
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32"><Configuration>Debug</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>15.0</VCProjectVersion>
+    <ProjectGuid>{A1C04E7B-9F32-4D56-8E10-11B2C3D4E5F6}</ProjectGuid>
+    <RootNamespace>ukko</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.17134.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v141</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'=='Release'" Label="Configuration">
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)..\build\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)..\build\obj\ukko\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>ukko</TargetName>
+    <!-- The demo reads reverse/ghidra/UKKO.EXE by a relative path, so
+         debug from the repository root, not from src/. -->
+    <LocalDebuggerWorkingDirectory>$(ProjectDir)..</LocalDebuggerWorkingDirectory>
+    <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <!-- /TC compiles everything as C, not C++. MSVC has no C89
+           switch; emscripten's clang with -std=c89 -pedantic is what
+           actually catches the lapses, which is why tools/build_web.sh
+           is wired up from the start. -->
+      <CompileAs>CompileAsC</CompileAs>
+      <WarningLevel>Level4</WarningLevel>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)third_party\SDL\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <!-- shell32 is SDL2main's, for CommandLineToArgvW. -->
+      <AdditionalDependencies>SDL2.lib;SDL2main.lib;shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
+    <ClCompile><Optimization>Disabled</Optimization><RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary></ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
+    <ClCompile><Optimization>MaxSpeed</Optimization><FunctionLevelLinking>true</FunctionLevelLinking><IntrinsicFunctions>true</IntrinsicFunctions><RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary></ClCompile>
+    <Link><EnableCOMDATFolding>true</EnableCOMDATFolding><OptimizeReferences>true</OptimizeReferences></Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Platform)'=='Win32'">
+    <Link><AdditionalLibraryDirectories>$(ProjectDir)third_party\SDL\lib\x86;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories></Link>
+    <PostBuildEvent><Command>xcopy /D /Y "$(ProjectDir)third_party\SDL\lib\x86\SDL2.dll" "$(OutDir)"</Command></PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Platform)'=='x64'">
+    <Link><AdditionalLibraryDirectories>$(ProjectDir)third_party\SDL\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories></Link>
+    <PostBuildEvent><Command>xcopy /D /Y "$(ProjectDir)third_party\SDL\lib\x64\SDL2.dll" "$(OutDir)"</Command></PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <!-- Vendored and not ours to tidy: /W4 flags narrowing
+         that its own -ansi -pedantic -Wall build accepts. -->
+    <ClCompile Include="third_party\ibxm\ibxm.c">
+      <WarningLevel>Level1</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="main_sdl.c" />
+    <ClCompile Include="pklite.c" />
+    <ClCompile Include="ukko\ukko_demo.c" />
+    <ClCompile Include="ukko\ukko_game.c" />
+    <ClCompile Include="ukko\ukko_line.c" />
+    <ClCompile Include="ukko\ukko_music.c" />
+    <ClCompile Include="ukko\ukko_pose.c" />
+    <ClCompile Include="ukko\ukko_scene.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="pd.h" />
+    <ClInclude Include="host.h" />
+    <ClInclude Include="pklite.h" />
+    <ClInclude Include="ukko\ukko.h" />
+    <ClInclude Include="ukko\ukko_game.h" />
+    <ClInclude Include="ukko\ukko_assets.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

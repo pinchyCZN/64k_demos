@@ -1,0 +1,601 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                       LITHIUM: THE BUMP MAP
+
+
+Abstract
+
+   A height field refracting a picture. Each pixel's horizontal and
+   vertical slope is packed into a 16-bit offset, and the picture is
+   read at that displacement instead of straight on - so a flat area
+   samples itself and a slope pulls the sample sideways.
+
+   NO MULTIPLY AND NO LIGHTING MODEL. The gradient pair IS the
+   address, which is the whole trick: one table lookup per pixel,
+   four pixels at a time in 32-bit registers.
+
+   What makes the bumps is the dust - effects/dust.txt. The particles
+   never draw a pixel; they stamp an 8x8 brush into the field, and
+   this is what makes the field visible.
+
+   All [verified] from the three routines unless marked.
+
+Table of Contents
+
+   1. The pieces
+   2. Stamping the field
+   3. Relaxing the field
+   4. Bump_Render
+   5. The interlace
+   6. The flash, and what it is tied to
+   7. What the scene seeds
+      7.1. Which of the four buffers can be compared, and how
+   8. Open questions
+
+1.  The pieces
+
+   All three run every frame of phase 2 of maybe_Scene_BumpShatter.
+
+       1000:0806   stamp every particle into the field   inline
+       1000:08af   relax the field                       inline
+       1000:0ad1   Bump_Render                           a function
+
+   The three segments involved stay fixed:
+
+       0x7ad2   the height field, 320 x 200 bytes - the same buffer
+                effects/sky.txt uses for the flare sprite, reused
+       0x5ad2   the picture being refracted - the same buffer the
+                title image and the text renderer compose into,
+                effects/text.txt section 5
+       0x4ad2   the back buffer, or 0xa000 direct
+
+2.  Stamping the field
+
+   1000:0806, over the 1000 particles of effects/dust.txt.
+
+       DS = 0x7ad2, ES = 0x2ad2, SI = 0x3820
+       per particle:
+           bx = drawn_x >> 7
+           dx = drawn_y >> 7
+           bx += dx*0x40 + dx*0x100              ie. dx*320 + bx
+           skip if bx <= 0x140
+                                                 BX IS 16-BIT and the
+                                                 sum WRAPS before this
+                                                 test - a particle
+                                                 below the screen
+                                                 lands elsewhere, it
+                                                 does not vanish
+           BP = g_DustBrushA, or g_DustBrushB when g_BumpInterlace
+                is zero
+           8 rows of 2 dwords:
+               ABANDON THE PARTICLE if bx >= 0xf780
+               add the brush dword to [bx], EACH BYTE SATURATING
+               at 0xff
+               bx += 0x140
+
+   THE UPPER BOUND IS TESTED PER BRUSH ROW, NOT PER PARTICLE. img
+   0x0842 is the top of the row loop that DH counts down, so a brush
+   whose origin is near the bottom is drawn part-way and then
+   dropped - it is neither clipped to the last row nor wrapped.
+   Writing all eight rows regardless puts height into rows 198 and
+   199, which the relaxation cannot reach [verified byte-exact
+   against the emulator over all 65,536 bytes of the field].
+               bx += 4, bp += 4
+           bx += 0x138                           8 + 0x138 = 320
+           si += 0xc
+
+   SEVEN FRACTIONAL BITS. Dust_ResetFromPoint's launch point
+   0x5000, 0x3200 shifts down to 160, 100 - the centre of a 320 x 200
+   screen - which fixes the particle coordinate format.
+
+   THE ADD SATURATES RATHER THAN WRAPPING. Overlapping particles pile
+   into a brighter bump instead of rolling over to zero, and that is
+   why a thousand points read as a surface rather than as noise.
+
+   The brushes are 8 x 8 bytes in the CODE SEGMENT at 1000:a031 and
+   1000:a071, immediately before g_SinTable. Both are ROUND SPLATS,
+   symmetric on both axes [verified]:
+
+       g_DustBrushA                    g_DustBrushB
+       00 00 01 02 02 01 00 00         00 00 01 01 01 01 00 00
+       00 02 03 04 04 03 02 00         00 01 02 02 02 02 01 00
+       01 03 07 06 06 07 03 01         01 02 02 03 03 02 02 01
+       02 04 06 08 08 06 04 02         01 02 03 04 04 03 02 01
+       02 04 06 08 08 06 04 02         01 02 03 04 04 03 02 01
+       01 03 07 06 06 07 03 01         01 02 02 03 03 02 02 01
+       00 02 03 04 04 03 02 00         00 01 02 02 02 02 01 00
+       00 00 01 02 02 01 00 00         00 00 01 01 01 01 00 00
+
+   B IS ABOUT HALF A'S AMPLITUDE, not a different size - both are
+   8 x 8 and both peak at the centre, at 8 and at 4. The 07 either
+   side of the 06 in A's third row is the only break in an otherwise
+   smooth falloff.
+
+3.  Relaxing the field
+
+   1000:08af, after the stamping and before the render.
+
+       DI = 0x140, BP = 0xc7 rows
+       per pixel, 0x140 a row:
+           ax = [di-1] + [di+1] + [di+0x140] + [di-0x140]
+           ax >>= 2
+           if ax != 0: ax--
+           [di] = al
+
+   A FOUR-NEIGHBOUR AVERAGE WITH A DECAY OF ONE. The average spreads
+   a stamp outward a pixel a frame; the decrement drains it. So a
+   bump rises where particles are and dies where they have left, with
+   no per-particle lifetime anywhere.
+
+   It starts one row in and stops one row short, which is why the
+   +/- 0x140 reads need no bounds check.
+
+   THE HALF IT WALKS IS CHOSEN BY g_FieldToggle, img 0x08a3 - THE
+   SAME BYTE Bump_Render steps. So the half relaxed this frame is the
+   half the render did not draw, and the two alternate together.
+   Driving the relaxation from any counter that moves more slowly
+   leaves one half never drained: it saturates, and the result is a
+   grain and a row banding the original has not got.
+
+   HOW DENSE THE FIELD GETS DEPENDS ON THE FRAME RATE. The stamp
+   runs once a FRAME and the particles move once a TICK, so a
+   machine that draws more frames per tick lays more brush down per
+   unit of movement. Measured at 35,000 DOSBox cycles the field runs
+   42 to 81 per cent non-zero; a port drawing every tick will sit
+   above that, and the difference is the frame rate rather than the
+   stamp - ../README.txt section 11.2.
+
+   THE ROWS IT CANNOT REACH ARE NEVER STAMPED, so nothing collects
+   there. The relaxation covers 0xc7 rows from row 1, leaving the
+   top row and everything from row 200 down with no drain at all -
+   and the stamp's own test at 0x0842 accepts an origin as low as
+   row 197, whose eight-row brush would reach past the buffer. That
+   never happens: the field's bottom ten rows read ZERO at three
+   points across the phase, and the active band moves UPWARD
+   through it, rows 33 to 160 and then 0 to 141 [verified, dumped
+   from 0x7ad2 in the emulator].
+
+   WHAT KEEPS THEM EMPTY IS THE MASK, not a bound. A particle chases
+   a target sampled from the letter mask - ./dust.txt section 2 -
+   and the mask has nothing near the bottom of the screen, so no
+   origin is ever generated down there. A transcription whose dust
+   reaches those rows will grow a band the demo does not have, and
+   the fault is then in the particle targets rather than in the
+   stamp or the relaxation. Do NOT add a drain to compensate.
+
+4.  Bump_Render
+
+   1000:0ad1.
+
+       DS = 0x7ad2, ES = 0x5ad2, FS = 0x4ad2 or 0xa000
+       DI = 0xf8bc, walking UPWARD
+       SI = (g_BumpLightX >> 8) + (g_BumpLightY & 0xff00)
+
+       per four pixels, 0x50 times a row:
+           eax = [di+4]                 four heights
+           edx = [di-0x13c]             the same four, one row up
+           ebx = eax rotated one byte, carrying CL in
+           edx -= eax                   the VERTICAL gradient
+           eax -= ebx                   the HORIZONTAL gradient
+           eax += eax;  edx += edx
+           eax &= 0xfefefefe;  edx &= 0xfefefefe
+           for each of the four:
+               bl = its dx byte, bh = its dy byte
+               pixel = ES:[bx + si]
+           FS:[di+4] = the four pixels
+
+   SI IS SWEPT ACROSS THE SCREEN, NOT HELD. It drops by 2 every four
+   pixels at 0x0b6d and is restored by the ADD SI, 0xa0 at 0x0b7d, so
+   the picture is MAPPED over the surface at half a texel per column.
+   Within a group of four the left pair reads SI and the right pair
+   SI+1, which is the half.
+
+   VERTICALLY IT DEPENDS ON THE INTERLACE. The interlaced path takes
+   the 0x0ba4 tail and drops SI by 0x100 for every row it draws; the
+   full-rate path instead bumps g_FieldToggle at img 0x0b89 and goes
+   straight back round at img 0x0b94 while that is odd, LEAVING SI
+   ALONE - so there the light descends one texel row per TWO screen
+   rows. Measured: 198 rows drawn against 99 subtractions of 0x100
+   [verified]. Sweeping it every row on the full-rate path moves the
+   light down the picture twice as fast as the original.
+
+   THAT IS WHY MORE THAN ONE HIGHLIGHT APPEARS. The base offset
+   travels about 160 texels across and 100 down over a frame, far
+   enough that opposite corners of the screen sit near different
+   glows of the three in the picture, and the surface carries a
+   large-scale lighting ramp on top of the per-pixel displacement.
+   Sampling from one fixed offset instead gives a single hotspot.
+
+   THE HEIGHTS ARE READ FOUR BYTES AHEAD OF THE PIXELS THEY SHADE.
+   img 0x0b20 reads [DI+4], img 0x0b48 steps DI down by four and img
+   0x0b74 writes [DI+4] with the NEW DI - so the group written is the
+   one four bytes below the group read, and the vertical neighbour at
+   [DI-0x13c] is one row up from the READ. The relief therefore sits
+   four columns to the left of the field that made it.
+
+   IT COVERS ROWS 1 TO 198. DI starts at 0xf8bc and the loop runs
+   while DI >= 0x280 at 0x0bac, which with the four-byte offset above
+   puts the writes at 0x140 to 0xf8bf - all of row 1 through row 198
+   bar its last three columns. ROWS 0 AND 199 ARE NEVER WRITTEN. Row
+   199 is also the one row the interlaced relaxation never reaches,
+   section 5, so it accumulates stamps with nothing to drain them;
+   drawing it puts a saturated lumpy strip along the bottom that the
+   demo does not have.
+
+   THE TWO SUBTRACTIONS ARE 32-BIT AND THEIR BORROWS CROSS BYTES.
+   Only the DOUBLING's carry is removed, by the 0xfefefefe at img
+   0x0b3e clearing the low bit of each byte - which is the bit a
+   left shift carries in. Computing the four slopes independently
+   therefore disagrees with the original on about a quarter of the
+   pixels, by one or two levels each [verified].
+
+   THE HORIZONTAL NEIGHBOUR IS THE ONE AT THE HIGHER ADDRESS. img
+   0x0b2c exchanges CL with BL and img 0x0b2e rotates right a byte,
+   which shifts the four heights along and carries the PREVIOUS
+   group's first height in as this group's fourth neighbour. So the
+   slope is height minus the byte after it, and CL threads that
+   chain across groups and across rows - it is never reset.
+
+   THE GRADIENT PAIR IS THE ADDRESS. bx is assembled as (dy, dx), so
+   a byte of slope on each axis becomes a 16-bit offset into the
+   64 KB at ES. There is no dot product and no normal - the
+   displacement IS the shading, because the picture is read somewhere
+   else than it is written.
+
+   MASKING WITH 0xfefefefe IS WHAT KEEPS THE FOUR BYTES SEPARATE.
+   After the doubling, clearing each byte's low bit stops a carry
+   crossing into the next pixel's slope. The doubling is the gain:
+   without it a one-level step would move the sample one byte.
+
+   The rotate with a carry-in through CL is how the horizontal
+   neighbour is obtained without a second memory read - the four
+   heights are shifted along by one byte inside the register.
+
+   WHERE THE LIGHT SITS DECIDES WHETHER THE RELIEF READS AT ALL. At a
+   disc's centre every flat pixel samples the maximum and a slope can
+   only darken it, so the surface inverts into dark outlines on a
+   flat glare; parked on the linear part of a disc's ramp a slope
+   moves the sample either way and the bumps come out properly. And
+   the picture is only 56 per cent lit, so a light off the discs
+   leaves the whole surface black - which is what the demo's wander
+   does for much of the time.
+
+   SI IS THE LIGHT. Vec_Ease2D at 1000:6244 moves it, so the sampled
+   picture drifts under the bumps and the surface appears to be lit
+   from a moving source.
+
+   AND THERE ARE THREE OF THEM. The picture this scene refracts is
+   Tex_BuildThreeGlows' output - the script builds it at img 0x029d,
+   immediately before the runner - so the "lights" are the three
+   radial discs of subsystems/texture.txt section 6.2, and a pixel's
+   slope decides which of them it happens to catch. Nothing in the
+   bump code knows there are three; the count is a property of the
+   picture.
+
+   WHAT AIMS IT IS Bump_RandomiseLight at 1000:0c44, which sets
+   g_BumpLightVelX and g_BumpLightVelY from Rnd_NextB >> 5. It is
+   called from Tick_Default - the common tail of every handler - on
+   the eighth tick of a fade, so the light changes direction on a
+   slow cadence that belongs to no scene in particular.
+
+5.  The interlace
+      5.1. What the break hands over
+
+   g_BumpInterlace at 1000:8ff8 picks the destination and halves the
+   work.
+
+       nonzero   FS = 0x4ad2, every row, and g_FieldToggle is reset
+       zero      FS = 0xa000 direct, alternate rows, the field
+                 chosen by g_FieldToggle
+
+   So the expensive path writes a back buffer in full and the cheap
+   one writes the screen in fields. It also picks the brush: the
+   full-rate path stamps with g_DustBrushA and the interlaced one
+   with the half-amplitude g_DustBrushB.
+
+   THE SCENE CROSSES OVER AFTER 250 FRAMES. Nothing initialises
+   g_RockSlideX - the only writers drain it, Tick_Dust by 0x20 a tick
+   at 0x6a56 and Tick_Rock by 4, both guarded so they floor at zero -
+   so it holds its LOADED value, and the image carries 0x2ee0 at
+   1000:8ff9 [verified]. The test at 0x07f4 sets the flag once it
+   falls below 0xfa0, which at 0x20 a tick is 250 ticks in. Only
+   Tick_Dust and Tick_Rock drain it and neither runs before this
+   scene installs them, so the count starts here.
+
+   THE LOADED STATE OF THE OTHER TWO IS NEXT TO IT [verified]:
+
+       1000:8ff7   g_DustMaskShift   0x0b    the full-height word
+       1000:8ff8   g_BumpInterlace   0x00    the opening path
+       1000:8ff9   g_RockSlideX      0x2ee0  250 ticks of interlace
+
+   THE ROCK'S POSITION IS LOOKED UP, NOT FLOWN. Obj_WobblePos at
+   1000:6008 reads the sine table three times off the rock's own
+   attitude - the pitch, yaw and roll accumulators Tick_Dust steps
+   by 0x45, 0x24 and 0x36 a tick - so it traces a Lissajous figure:
+
+       pos x = (sin(pitch) >> 2) + g_RockSlideX     img 0x601b
+       pos y = (sin(yaw)   >> 2)
+       pos z = (sin(roll)  >> 1) + 0x1f40 + home z  img 0x6058
+
+   g_RockSlideX IS THE ENTRANCE, and that is why one counter serves
+   two purposes: the rock begins 0x2ee0 off to the right and slides
+   in as the same drain that decides the interlace crossover empties
+   it. The scene's opening shimmer and the rock's approach are the
+   same clock.
+
+   THE APPROACH IS GUARDED AND SO IT WAITS. img 0x6a64 is a JLE past
+   the fold, so home z takes nothing while flight z is negative:
+   seeded at -1800 and stepped 4 a tick, that is 450 ticks of a rock
+   that wobbles in place before it begins to accelerate. Folding
+   unconditionally drives it through the surface long before the
+   shatter.
+
+   ONLY THE ANGLES AND THE POSITION REACH THE MESH. Obj_Select at
+   1000:4ffd copies g_SlotAngle X, Y and Z and the position into the
+   object Mesh_Transform reads; pitch, yaw and roll stay behind in
+   the slot bank as the wobble's phases and never rotate anything.
+
+   ALL ELEVEN FIELDS VERIFIED against the emulator at the frame the
+   rock enters - 293 ticks into the scene - position, the six
+   accumulators, home z and flight z, exact [verified].
+
+   THE TOP AND BOTTOM ROWS ARE CLEARED EVERY FRAME, img 0x0922 and
+   0x092d, which are exactly the two Bump_Render never writes.
+   Without that, whatever the previous scene left shows along both
+   edges for the whole shot.
+
+   THE ROCK IS DRAWN IN THIS SCENE, AND ONLY AFTER THE CROSSOVER.
+   The test at 0x08f0 sends the interlaced path straight to the
+   bottom of the loop; the full-rate path falls into img 0x0904,
+   which every frame zeroes g_VertPoolCount and runs Obj_Select(4),
+   Mesh_Transform, Scene_ProjectVerts and Scene_DrawFacesReset. The
+   setup already pointed g_MeshSrcOff at 0x41ea with scale 0x10 at
+   img 0x07a9, so that is the chrome rock of effects/rock.txt,
+   arriving over the surface before it breaks.
+
+   IT CANNOT AFFECT THE HEIGHT FIELD. The field is segment 0x7ad2
+   and the rock is drawn into 0x4ad2, which is also where
+   Bump_Render writes once the flag is set - so the rock lands ON
+   the rendered picture, after the displacement has been resolved,
+   and nothing it draws can feed back into the relaxation.
+
+   THE SHATTER FIRES ON THE ROCK'S DEPTH. 1000:8925 is g_SlotPosZ
+   for slot 4 - the array starts at 1000:8921 and steps 4 - so the
+   test at img 0x08f8 against 0x88b8 is a position test on the rock
+   itself, and it branches to Tex_SnapshotFrom plus Shatter_Build
+   when the rock passes that depth. Z is seeded to 0x1b58 at img
+   0x072a and Obj_WobblePos rewrites it every tick from the sine
+   table plus g_SlotHomeZ, so what actually drives the break is
+   g_SlotHomeZ: g_SlotFlightZ is seeded to -1800 at img 0x0734 and
+   Tick_Dust adds 4 a tick, folding it into g_SlotHomeZ once it
+   turns positive, so the approach accelerates and the surface
+   breaks when the rock arrives - not on a clock or a music cue.
+
+   THAT CROSSOVER IS VISIBLE. Before it, half the scanlines are
+   repainted per frame straight to 0xa000 and the picture shimmers;
+   after it, every row is drawn, the relaxation reaches row 199, and
+   the stamp changes to the peak-8 brush. Holding the opening state
+   for the whole scene leaves the shimmer running and the bottom rows
+   with nothing to drain them.
+
+   IT IS NOT ONLY A SAVING - IT IS WHAT GIVES THE SURFACE ITS
+   RELIEF. The relaxation at 1000:08af walks 0xc7 rows when the flag
+   is set and 0x63 when it is clear, skipping one each time, so in
+   the scene's opening state HALF THE FIELD IS NEVER TOUCHED IN A
+   GIVEN FRAME and those rows keep their full height. The average
+   and the decay only reach a row every other frame.
+
+   RELAXING EVERY ROW INSTEAD COLLAPSES THE EFFECT. Measured over
+   the opening burst, the interlaced field carries about twelve
+   times the total height of one relaxed in full, and the difference
+   is visible as the difference between a heavy noise surface and a
+   scatter of small droplets. The half-amplitude brush is paired
+   with the interlace precisely because the interlace lets height
+   accumulate.
+
+5.1.  What the break hands over
+
+   img 0x0942 to 0x09ce, once, between the last bump frame and the
+   first shatter frame:
+
+       Tex_SnapshotFrom(0x4ad2)        the frame the shards carry
+       g_ShatterAssemble = 0
+       Shatter_Build
+       g_BumpInterlace = 1
+       g_TickHandler = Tick_Rock
+       Mem_ClearSegment(0x4ad2)
+       Obj_Reset(0);  slot 0's flight z = 0x1000, home = 0
+       g_SlotAngleA{X,Y,Z}[0] = 0x80, 0x40, 0x20
+       g_PalFlash = 0;  g_PalRampShift = 2;  g_DepthNear = 0x36b
+       g_TunnelFirstRing = -4;  g_TunnelLastRing = 11
+
+   THE SNAPSHOT IS OF THE FRAME JUST DRAWN, so what breaks is the
+   bump surface with the rock already on it - effects/shatter.txt
+   section 5 and subsystems/raster.txt section 4.1.
+
+   TEX_SNAPSHOTFROM ALSO AIMS THE FADE, and that is the whole of the
+   next phase's lighting. img 0x27ea zeroes g_PalFadeTarget2 before
+   a byte is copied. This scene runs at a target of -0xc0 with
+   g_PalFlash dragging the fade back up on every beat - section 6 -
+   and the handover clears the flash three instructions later, so
+   without that store nothing holds the level up and the tunnel goes
+   black a few seconds in. A copy routine carrying a palette write
+   reads as incidental and is not.
+
+   THE RAMP IS UNCHANGED ACROSS THE HANDOVER. Pal_Animate advances
+   its own three phases, so the colour keeps cycling with no scene
+   involvement; only g_PalRampShift is restated, and at the same 2
+   the bump scene was already using.
+
+   ONLY SLOT 0 IS RESET. The rock keeps the spin and the depth this
+   scene left it at and simply starts being flown by a different
+   handler - effects/rock.txt section 5.
+
+   THE INTERLACE FLAG IS SET RATHER THAN CLEARED, and it is not the
+   bump render that reads it afterwards: Bump_Render is not called
+   again. It survives as the flag at img 0x0ae9 that points the
+   render's FS at the back buffer instead of 0xa000, which is dead
+   in this phase.
+
+   THE TICK HANDLER IS ASSIGNED TWICE. Tex_SnapshotFrom installs the
+   default one at img 0x27e3 before it copies a byte and img 0x0957
+   overwrites it, so the snapshot call is not where a scene's
+   handler can be read from.
+
+6.  The flash, and what it is tied to
+
+   g_PalFlash at 1000:8fe4 is set to 0x80 by this scene at img 0x0794
+   and cleared at img 0x09b0, so it belongs to phase two.
+   Tick_Default uses it twice, img 0x6c8e onward:
+
+       g_FlashCountdown--
+       if it reached zero and g_PalFlash != 0:
+           g_FlashCountdown = 0x18
+           Bump_RandomiseLight                 THE LIGHT RE-AIMS
+           raise g_PalFade to g_PalFlash
+       if the music position changed:
+           g_FlashCountdown = 0x18             RESET, no re-aim
+           raise g_PalFade to g_PalFlash
+
+   0x80 IS A FULL WHITE FLASH. Pal_Upload biases every component by
+   g_PalFade >> 2, so +32 saturates all 64 entries of a 0 to 0x3f
+   ramp. The scene's resting target is 0xff40 - a bias of -48, nearly
+   black - so the screen swings between almost black and pure white
+   on every music position change.
+
+   ONE COUNTER DOES BOTH JOBS, and that couples them. A beat resets
+   the countdown WITHOUT re-aiming, so beats arriving faster than 24
+   ticks hold the light still while the screen keeps flashing.
+
+   THE SIM LEAVES THE FLASH OUT. It takes the raw cycling colours
+   with no bias at all - a deliberate divergence, recorded here so
+   nobody restores it: neither end of the swing is worth watching.
+
+7.  What the scene seeds
+
+   THE WORD IS "VOTE", and it is drawn, not stored as a bitmap. The
+   setup clears 6,400 bytes at 0x2ad2:0x6700 with a REP STOSD at img
+   0x0686 and then calls THE CREDIT ROLL'S OWN TEXT ROUTINE, img
+   0x2d46, to write into them:
+
+       img 0x068b   cs:[0x8f4b] = 0x6700    the pen, the destination
+                                            offset inside the segment
+       img 0x0692   bx = 0x92eb             the string - "VOTE", NUL
+                                            terminated
+       img 0x0695   ax = 0x2ad2             the destination SEGMENT
+       img 0x0698   call 0x2d46             dx = 0, so full strength
+
+   So the mask is 320 by 20 and lives immediately after the particle
+   pool in the module's own segment, past the end of the module's
+   22,902 bytes. Its ink is 0x0f and everything else is zero, and the
+   glyphs occupy rows 2 to 15 of the 20 - which is what the phase's
+   sample shift in ../effects/dust.txt section 2 is widening across
+   [verified, dumped from the running demo].
+
+   THE BUFFERS ARE CLEARED FIRST, img 0x066c and 0x0672:
+   Mem_ClearSegment on 0x7ad2, the height field, and on 0x4ad2, the
+   back buffer. The field starting at zero is what makes the opening
+   burst read as a surface rising out of nothing.
+
+   A MUSIC GATE SPLITS THE SETUP IN TWO. img 0x0762 is
+   Demo_RunUntil(0x18) - ../subsystems/timeline.txt section 2 - and
+   it sits between the two halves rather than at the scene's edge.
+   Before it: the two buffer clears above, the mask, the slot
+   zeroing from img 0x0665, and the rock's seeding - pos z 0x1b58 at
+   img 0x072a and flight z -1800 at img 0x0734. After it, img 0x0765
+   onward:
+
+       cs:[0x8ee8], [0x8eea], [0x8eec] = 0xf8a3, 0xf6f0, 0xf41b
+       g_PalRampShift = 2
+       g_PalFade = g_PalFadeTarget2 = 0xff00, then Pal_Animate and
+           Pal_Upload
+       g_PalFlash = 0x80;  g_FlashCountdown = 0x18
+       g_PalFade = 0x80;  g_PalFadeTarget2 = 0xff40
+       the fade shift = 6
+       g_TickHandler = Tick_Dust                at img 0x07ed
+
+   SO THE SCENE OPENS WITH 90 TICKS OF NOTHING OF ITS OWN. Tick_Dust
+   is not installed until after the gate, g_TickHandler still holds
+   the Tick_Default written at img 0x0665, and Demo_RunUntil neither
+   draws nor presents - so the flyover's last frame is held while the
+   module covers the 90 ticks from order 0x15 to order 0x18
+   [verified, measured at 111 display frames]. The dust cloud's own
+   572 ticks begin only after that.
+
+   THE SCENE CYCLES ITS OWN PALETTE, and Tick_Default does NOT.
+   Only a scene's handler calls Pal_Animate - ./transition.txt - and
+   Tick_Dust's tail does it every tick after driving the three
+   accumulators hard: +0x73, +0x50 and +0x0b at img 0x6b1d, against
+   the +0xd, +0x10 and +0x15 Pal_Animate adds for itself. So the
+   surface's colours run several times faster here than anywhere
+   else, and a port that only seeds the phases gets a palette that
+   never moves - 256 entries of one grey, which looks exactly like a
+   broken renderer and is not one.
+
+   NO STORED PALETTE IS SELECTED EITHER. Pal_Animate GENERATES the
+   ramps from those accumulators, so there is nothing to load.
+
+   THE 7 TO 1 RELOAD OF g_DustPhase IS NOT PART OF THE REFILL. img
+   0x6b0f sits on the path both branches of the music test reach, so
+   it runs every tick; only the 0xfc reload is inside the refill.
+
+   FOUR VALUES ARRIVE FROM THE IMAGE AND NOT FROM THIS SETUP, which
+   never writes them [verified, read at img 0x0665 in the emulator
+   and matched against the image's own bytes]:
+
+       img 0x8ff9   g_RockSlideX        0x2ee0   250 ticks
+       img 0x8ff7   g_DustPhase         0x0b
+       img 0x8fea   g_DustJitterShift   0x01
+       img 0x8fc7   g_RndStateB0 / B1   0xa5b5, 0xcab6
+
+   A JITTER SHIFT OF 0 RATHER THAN 1 IS NOT A SMALL ERROR. It is the
+   SAR count applied to each random before it is added to the target,
+   so zero adds the whole 16-bit value and the cloud wanders twice as
+   far - the stamps scatter and the surface comes out grainy.
+
+   THE SECOND GENERATOR'S PAIR IS A LOADED VALUE TOO. Nothing in the
+   demo but Rnd_NextB touches img 0x8fc7, so the bump scene still
+   finds exactly what the image carries - and the image gives it the
+   same pair it gives the main generator. It is not a seed anyone
+   chose, and inventing one leaves the light wandering differently.
+
+   THE PALETTE PHASES ARE SEEDED, NOT STARTED FROM ZERO. Those three
+   words are Pal_Animate's accumulators - subsystems/texture.txt - so
+   the cycling begins at a defined point in the ramp instead of
+   wherever the previous scene left it, and g_PalRampShift of 2
+   steepens every ramp at once. Both change what the surface looks
+   like and neither is guessable from the effect code.
+
+7.1.  Which of the four buffers can be compared, and how
+
+   THE SCENE IS FOUR ARRAYS: the height field at 0x7ad2, the picture
+   at 0x5ad2, the mask at 0x2ad2:0x6700 and the 1000-record pool at
+   0x2ad2:0x3820. They do not all compare the same way.
+
+   THE PICTURE AND THE MASK ARE STATIC and byte-exact - both are
+   built once by the setup and never written again [verified].
+
+   THE POOL COMPARES PER TICK, and exactly. Seeded with the main
+   generator's state at the scene's entry, a port reproduces
+   Dust_ResetFromPoint's output byte for byte AND the generator's
+   state afterwards, then tracks the demo through 121 ticks of the
+   mover with no difference in 12,000 bytes [verified]. The mover is
+   the only consumer in between, so the generator is a complete
+   description of the scene's randomness.
+
+   THE FIELD CANNOT, WITHOUT MATCHING THE FRAME RATE. The stamp runs
+   once a FRAME and the particles move once a TICK, so two machines
+   drawing at different rates lay different amounts of brush down for
+   the same motion - section 3. It is the one of the four whose
+   contents depend on the host.
+
+8.  Open questions
+
+   o Why the interlaced path stamps at half amplitude. Keeping the
+     deposit rate constant across a path that runs more often would
+     explain it, but nothing read says so [guess].
+
+   o The gain. Doubling the gradient fixes the refraction strength in
+     the code, so the effect has no parameter for how bumpy the
+     surface appears.

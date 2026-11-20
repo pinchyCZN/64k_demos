@@ -1,0 +1,560 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                  EXCURSION: THE VOXEL LANDSCAPE
+
+
+Abstract
+
+   Voxel_Render at XCURSION_U.EXE 1000:3620. A back-to-front span
+   filler with a per-column y-buffer, a rotating camera built from the
+   sine table, two height layers, and a dithered sky.
+
+   The brown land and the blue water are ONE COMPARE AND A DIFFERENT
+   COLOUR BIAS: the second layer wins where it is higher, and its
+   colour gets +0x24, which moves it out of Pal_BuildMain's brown band
+   and into the blue one.
+
+   Three callers, so this is the demo's workhorse renderer.
+
+Table of Contents
+
+   1. The buffers
+      1.1. Which segment is which
+      1.2. The water is a signed ripple, and the maps are not twins
+   2. Per distance slice
+   3. Per column, and the y-buffer
+   4. The water
+   5. The sky
+   6. The camera
+   7. Why this is not maybe_Mapped_Render
+   8. What the reconstruction diverges on
+      8.1. The camera can be sampled rather than guessed
+      8.2. What moves the camera
+      8.3. The steering tail, and why the countdown is still
+   9. The sky
+   10. Open questions
+1.  The buffers
+
+1.1.  Which segment is which
+
+   Read off the three loads in the inner loop at img 0x3750, 0x3753
+   and 0x376b, so this is the code's own answer and not an inference
+   from argument order [verified]:
+
+   +---------+-----------+-------------------+----------------------+
+   | Segment | At img    | Read as           | Holds                |
+   +=========+===========+===================+======================+
+   | es      | 0x2a79    | es:[si]           | the HEIGHT map       |
+   | fs      | 0x4a79    | fs:[si]           | the COLOUR map       |
+   | gs      | 0x8a79    | gs:[si + 0x4564]  | the WATER map        |
+   +---------+-----------+-------------------+----------------------+
+
+   THE WATER IS READ 0x4564 BYTES INTO ITS SEGMENT, not at zero.
+   Sampling that segment from its base gets a buffer that looks
+   degenerate and is simply the wrong place.
+
+   The height map is THE SAME BUFFER THE CAPTION FILL SAMPLES as its
+   flame texture - segment 0x2a79 both times, which is where its
+   parameters come from; see below and effects/firetext.txt 5.1.
+
+   Three tables, all in CS and all confirmed against the code:
+
+       img 0xa890   the slice table, with its cursor at img 0x9981
+       img 0xab7c   g_HeightToY, 256 dwords, REBUILT EVERY SLICE
+       img 0xb49c   g_ColumnTop, 160 words seeded 0xf8c0 + 2i
+
+   `cs:[bx - 0x5484]` and `cs:[di - 0x4b64]` are those last two in
+   the signed-16-bit spelling the listing uses.
+
+1.2.  The water is a signed ripple, and the maps are not twins
+
+   THE COLOUR MAP IS NOT A GENERATOR RUN. It is derived from the
+   height map beside it by Terrain_BuildShade at img 0x39d8, whose
+   first four instructions are DS = 0x2a79 and ES = 0x4a79 - height
+   in, colour out [verified].
+
+       height   Plasma_Generate(0x7fff, 0x4000, 3), no transform
+       colour   Terrain_BuildShade(height)
+
+   Both are confirmed against a running demo, byte for byte.
+
+   The shade is a CENTRAL DIFFERENCE ALONG THE LOW INDEX BYTE, which
+   is the axis the renderer's ry drives:
+
+       g = H[row, col-1] - H[row, col+1]
+       g = |g| * (g_VoxHeightScale >> 6) / cs:[0x986f], sign restored
+       v = g + 0x10, clamped to 1 .. 0x1e
+
+   That clamp is why it lands inside the 0 to 0x1f land band the
+   renderer tests at img 0x3758, and why sweeping generator
+   parameters for it never matches: 0x0a to 0x17 is a range no
+   generator produces.
+
+   TWO THINGS IN IT READ AS MISTAKES AND ARE NOT. `dec bl` then
+   `add bl, 2` steps the neighbour by the LOW BYTE ONLY, so the
+   lookup wraps inside the 256-byte row rather than crossing into the
+   next - the torus again. And bp carries the column counter AND the
+   gradient's sign at once: 0x400 is added when the gradient is
+   negative and taken off again after `cmp bp, 0x100` tests for it,
+   which is how one register does both jobs.
+
+   In the opening cs:[0x996f] is 0x100 and cs:[0x9971] is 0, so the
+   field is the full 256 by 256 from its origin; g_VoxHeightScale is
+   0x1000 and cs:[0x986f] is 0x53.
+
+   Demo_Timeline img 0x4e64 copies 0x4a79 to 0x2a79 through
+   `(v << 2) + 0x80`, and img 0x4f2e again, so a LATER part does
+   relate the two directly - but not this one: live, colour 0x14
+   against height 0xb3 is neither that transform nor its inverse.
+
+   THE WATER FIELD IS img 0x3a7f - the two-sine field at double
+   frequency - and it is SIGNED [verified]. 128 by 128 is 0x4000
+   bytes, which is exactly why the renderer masks its index with
+   0x3fff. Verified byte for byte against a running demo at the
+   offset it is actually read from.
+
+   READING IT AS UNSIGNED LOOKS RIGHT AND IS WRONG. Live samples run
+   0xfb to 0x05, which is -5 to +5 and reads as a flat pattern of
+   near-0x00 and near-0xff if taken unsigned - exactly the mistake of
+   calling the buffer degenerate. img 0x377a is `sar ah, 2`, an
+   ARITHMETIC shift, so the colour it adds is negative for half the
+   ripple. sim/xcursion/parts.py shifts it unsigned and is wrong on
+   that half.
+
+   The water is therefore a surface at g_WaterLevel plus or minus
+   five, not a wave buffer that is solved per frame.
+
+   +------------------+----------------------------------------------+
+   | Segment          | What                                         |
+   +==================+==============================================+
+   | DS = g_WorkSeg   | 0x5a79, the output                           |
+   | ES = 0x2a79      | the HEIGHT map, 256 x 256 bytes              |
+   | FS = 0x4a79      | the COLOUR map, 256 x 256 bytes              |
+   | GS = 0x8a79      | g_ScratchField at +0x4564, the water surface |
+   +------------------+----------------------------------------------+
+
+   Both maps are 256x256 and indexed by one 16-bit value, so the world
+   wraps in both axes for free - img 0x3738 builds the index as
+   `(y >> 4 & 0xff) | (x << 4 & 0xff00)` and never bounds-checks it.
+
+   The tables, all in the code segment [verified]:
+
+   +------------------+------+----------------------------------------+
+   | Label            | Size | What                                   |
+   +==================+======+========================================+
+   | g_SliceDist      |      | the distance of each slice             |
+   | g_SliceRows      |      | rows per slice, built alongside it     |
+   | g_HeightToY      | 256d | height -> screen y, REBUILT PER SLICE  |
+   | g_ColumnTop      | 160w | the y-buffer, one per 2-pixel column   |
+   | g_SkyGradient    |      | sky colour pairs                       |
+   +------------------+------+----------------------------------------+
+
+   g_ColumnTop has 160 entries because THE RENDERER IS 160 COLUMNS
+   WIDE: it writes a WORD per step, so one entry covers two pixels.
+   img 0x3623 seeds it with 0xf8c0 + 2i and img 0x37e4 ends the column
+   loop at 0xb5dc, which is 0xb49c + 0x140.
+
+2.  Per distance slice
+
+   The outer loop counts g_SliceCount down [verified]. Per slice:
+
+       dist     = next word of g_SliceDist
+       horizon  = (dist >> 1) - 0x2c, floored at 0
+       scale    = (g_CamScale / dist) + 0x48, then * 320
+
+   g_SliceDist and g_SliceRows are built together in Demo_Entry at
+   img 0x005c, and the step ACCELERATES - one byte per step until the
+   count reaches 0x32, two until 0x5a, three after that. So near
+   slices are fine and far ones coarse, which is where a voxel
+   renderer's time goes if it does not.
+
+   g_HeightToY is rebuilt every slice at img 0x371c: 256 dwords
+   descending by g_VoxHeightScale / dist. That is the whole of the
+   perspective for height - a height byte indexes straight into it.
+
+3.  Per column, and the y-buffer
+
+   160 columns [verified]:
+
+       si     = (ray.y >> 4 & 0xff) | (ray.x << 4 & 0xff00)
+       height = heightmap[si]
+       colour = colourmap[si] - the slice shade
+       if colour > 0x1f: colour = 0
+
+   The clamp keeps land inside 0x00..0x1f, which is the bottom half of
+   Pal_BuildMain's brown band.
+
+   Then the span fill, img 0x37ae-0x37c3:
+
+       y = g_HeightToY[height] + slice base + g_94f0, floored at 0x140
+       while g_ColumnTop[col] >= y:
+           write a WORD of two colours, XCHG AH,AL between rows
+           step up one row, 0x140 bytes
+       g_ColumnTop[col] = where it stopped
+
+   TWO THINGS MAKE THIS CHEAP. The y-buffer means a nearer slice can
+   only ever fill ABOVE what a farther one left, so occlusion costs one
+   compare and nothing is ever overdrawn. And the XCHG between rows
+   alternates two adjacent palette indices, so a span is DITHERED
+   vertically for free - which on a 32-entry colour band is what makes
+   it look like more colours than it has.
+
+4.  The water
+
+   Only when g_WaterLevel is non-zero [verified]. img 0x3762-0x3785:
+
+       si2 = (si + g_WaterScrollLatch) & 0x3fff
+       h   = g_ScratchField[si2]
+       if h + g_WaterLevel > terrain height:
+           height = h + g_WaterLevel
+           colour = colour + (h >> 2) + 0x24, capped at 0x3e
+
+   So the water is a SECOND HEIGHT LAYER and it wins where it is
+   higher - the ordinary way to draw a sea over a heightfield. The
+   +0x24 is what colours it: land stayed in 0x00..0x1f (brown), and
+   +0x24 puts this in 0x20..0x3f, which is Pal_BuildMain's BLUE band.
+   One compare and one bias is the entire "brown land, blue water".
+
+   THE WATER SURFACE IS THE TWO-SINE FIELD. g_ScratchField is what
+   Demo_Timeline img 0x507a builds - see effects/script1_landscape.txt
+   section 5 - so the ripple is that egg-crate, and g_WaterScroll
+   moves the sampling point. The field is masked to 0x3fff, so it is
+   read as 128x128, matching how it was written.
+
+5.  The sky
+
+   img 0x37fa-0x3870, after all the slices [verified]. Per column,
+   fill DOWNWARD from row 0 to g_ColumnTop with words from
+   g_SkyGradient, dithered against g_SkyDitherPhase - which img 0x37f5
+   increments once per frame.
+
+   THE TABLE IS BUILT ONCE, at img 0x00bb in the opening's init, 400
+   entries of ((0x15e + i) >> 2) - 0x20 clamped to 0x40 .. 0x7e and
+   split into a dithered pair of halves. The clamp is what gives the
+   sky a flat top and a flat bottom with the ramp between.
+
+   So the sky's dither alternates per frame as well as per pixel, which
+   on a CRT at 100 Hz averages to intermediate shades the palette does
+   not contain. g_SkyBias shifts where the gradient starts.
+
+6.  The camera
+
+   Voxel_LatchCamera at 1000:35d7 copies the timeline's parameters into
+   the ones the renderer reads, once per frame [verified]:
+
+       g_9360, g_9364  -> g_CamWorldX, g_CamWorldZ, THE MASTER pair,
+                          integrated by the mode 0 handler at
+                          img 0x0e0e and read by Mesh_SetupTransform
+       g_94d8, g_94dc  -> g_CamLatchX, g_CamLatchZ, the per-frame
+                          copies Voxel_LatchCamera makes at img 0x35dc
+                          and 0x35e6. VOXEL_RENDER READS THESE, not
+                          the master. An earlier reading named the
+                          latch g_CamWorldX/g_CamWorldY - the same
+                          name as the master and the wrong second
+                          axis
+       g_9871          -> g_CamScale
+       g_CamAngleNext  -> g_CamAngle
+       g_9450          -> g_94f0, the screen y offset
+       g_98f5          -> g_SkyBias
+       g_997b          -> g_WaterScroll, the master, advanced in the
+                          handler tail at img 0x2028 and read by
+                          Terrain_HeightAt at img 0x3db2
+       g_997d          -> g_WaterScrollLatch, the per-frame copy
+                          Voxel_LatchCamera writes at img 0x3611 and
+                          Voxel_Render reads at img 0x3762. The same
+                          latch pattern as g_ObjYaw -> g_ObjYawLatch.
+                          An earlier reading named the LATCH
+                          g_WaterScroll and recorded it at 0x997b,
+                          which is the master's address - two
+                          different words, one name
+
+   The indirection lets the script write a parameter at any point
+   without tearing a frame in progress.
+
+   THE CAMERA ROTATES, and this is where the sine table earns its
+   place. img 0x369d reads g_SinTable at cs:0x7f5e and img 0x36a3
+   reads cs:0x815e - the same table 0x200 bytes on, which is the
+   COSINE. There is no second table.
+
+   **THE MASK IS `& 0x7fc`, A BYTE OFFSET, SO THE CAMERA HAS 512
+   ANGULAR STEPS.** g_SinTable is a flat 640-dword table at a 4-byte
+   stride, and 0x200 bytes is 128 dwords - a quarter of 512. Reading
+   the table as 256 entries of 8 bytes, which is how the height field
+   generators index it, halves the angular resolution and puts the
+   camera at the wrong heading. See effects/script1_landscape.txt
+   section 4.
+
+       start.x = (sin - cos) * 1.25 * dist + g_CamLatchX
+       start.y = (cos + sin) * 1.25 * dist + g_CamLatchZ
+       step.x  = cos * dist >> 6
+       step.y  = sin * dist >> 6
+
+   The 1.25 is `x + (x >> 2)`, img 0x36ac-0x36b0. The start being a
+   rotated corner and the step a rotated unit vector is the standard
+   way to walk a slice; the sum and difference forms are the
+   45-degree-rotated basis that falls out of it.
+
+   g_CamAngleNext at cs:0x987d is what Demo_Timeline moves - `add
+   0x200` at img 0x50c2 and `sub 0x400` at img 0x5195 - so the
+   rotation is scripted, not interrupt-driven.
+
+7.  Why maybe_Mapped_Render is not the landscape
+
+   1000:2925 has a distance march and a far cutoff, which is the
+   shape of a landscape renderer and is not one.
+
+   It reads a PRECOMPUTED per-sample offset table out of segment
+   0x6a79 and therefore cannot rotate: a fixed table encodes one
+   viewing direction. Voxel_Render computes its rays from the sine
+   table per slice and rotates. They are different techniques, and
+   only this one is the landscape.
+
+   The lesson worth keeping: a distance accumulator and a far cutoff
+   are not enough to identify a landscape renderer. The y-buffer and
+   the ray construction are.
+
+8.  What the reconstruction diverges on
+
+   voxel_render in sim/xcursion/parts.py, part 11 of sim/xcursion/demo.py.
+   Transcribed: the slice table and its acceleration, the per-slice ray
+   and step construction from the sine table, the rebuilt g_HeightToY,
+   the 256x256 index with no bounds check, the colour clamp, the water
+   layer and its +0x24, the y-buffer span fill and its XCHG dither.
+   15 ms a frame at 2x.
+
+   EVERY PARAMETER IS NOW THE BINARY'S, read out of the variable
+   block's static initial values:
+
+   +--------------------+-----------+------------+
+   | Parameter          | Value     | At img     |
+   +====================+===========+============+
+   | g_VoxHeightScale   | 0x1000    | 0x986d     |
+   | g_WaterLevel       | 0x21      | 0xa598     |
+   | g_CamScale         | 0x0b00    | 0x9871     |
+   | camera x, y        | -0xa000   | 0x9360/64  |
+   | g_CamAngleNext     | 0x100     | 0x987d     |
+   +--------------------+-----------+------------+
+
+   NOTHING WRITES g_VoxHeightScale OR g_WaterLevel, and they are
+   still the binary's own values: THE VARIABLE BLOCK IS INITIALISED
+   DATA, not BSS, so they have starting values in the file. 4423 of
+   its 5408 bytes are non-zero.
+
+   THE SEA STARTS FLAT. g_ScratchField lives in segment 0x8a79, which
+   IS above the image and so genuinely zero, and g_WaterLevel 0x21 over
+   a zero field is a level sea at height 0x21 flooding the low ground.
+   It only ripples once Demo_Timeline builds the two-sine field into
+   it. Rendering with the rippling field from the start drowns almost
+   everything, which is how the two states got told apart.
+
+   Three divergences remain, all stated:
+
+   o **No sky.** g_SkyGradient has no located producer, so everything
+     above the skyline stays index 0. Deliberate.
+   o **The camera path is ours.** The demo integrates it in Timer_Isr
+     at img 0x0e8e - position, target and g_CamScale all move per
+     tick. Vec_Rotate3 at 1000:4a22 is now read; what is left unread is
+     the handler's own arithmetic around it.
+   o **Which plasma feeds which map is unresolved**, so the sim
+     generates two. The colour map is shifted into 0..0x1f because
+     Voxel_Render's own clamp at img 0x3758 discards anything above
+     that - the range is derived from the code's requirement, not
+     chosen for looks.
+
+   A note on the geometry, because it reads as a bug and is not: for
+   dist below 8 the slice base `(g_CamScale/dist + 0x48) * 320` exceeds
+   the framebuffer, so the nearest slices draw NOTHING and the first
+   visible slice is dist 8. 0x48 is 72, and at large dist the base
+   settles at 72*320 - so 0x48 IS THE HORIZON ROW.
+
+   Set g_VoxHeightScale much above 0x400 and the first drawing slice
+   fills the whole screen, because h * (hscale/dist) then exceeds the
+   distance from the base to the bottom row. That cliff is the code's,
+   not the transcription's, and it is why the real value matters.
+
+8.1.  The camera can be sampled rather than guessed
+
+   Every input the renderer takes is a readable global, so a
+   reconstruction does not have to invent a flight path [verified]:
+
+   +----------------+-----------+--------------------------------+
+   | What           | At img    | Live, in the opening           |
+   +================+===========+================================+
+   | world x        | 0x94d8    | 0x0002d28f, 32-bit             |
+   | world y        | 0x94dc    | 0x000102b4, 32-bit             |
+   | angle          | 0x9973    | 0x0169                         |
+   | scale          | 0x9975    | 0x096b                         |
+   | height scale   | 0x986d    | g_VoxHeightScale               |
+   | framebuffer    | 0x996b    | 0x4c1e, ie. the back buffer    |
+   +----------------+-----------+--------------------------------+
+
+   img 0x94e0 and 0x94e4 are not inputs: they are the per-slice rx
+   and ry the renderer derives from the above, so reading them says
+   only which slice it was on.
+
+   sim/ integrates a path of its own because this was not established
+   when it was written. It no longer has to.
+
+8.2.  What moves the camera
+
+   TWO STAGES, and only the first is a mystery. Voxel_LatchCamera at
+   img 0x35d7 copies seven accumulators into the globals the renderer
+   reads, once per frame [verified]:
+
+       0x9360 -> 0x94d8   world x        0x9450 -> 0x94f0   y offset
+       0x9364 -> 0x94dc   world y        0x98f5 -> 0x996d   sky bias
+       0x9871 -> 0x9975   scale          0x997b -> 0x997d   water scroll
+       0x987d -> 0x9973   angle
+
+   So nothing animates the camera directly: everything animates an
+   accumulator and the latch publishes it.
+
+   AN INTEGRATOR INSIDE Timer_Isr, at img 0x0dc5, advances three of
+   them [verified]. The path is two independent sine phases, one per
+   axis, with a third wobbling the heading, and THE THREE ADVANCE AT
+   DIFFERENT RATES - by 1, 2 and 2 - so the flight does not repeat on
+   a short cycle:
+
+       speed  = cs:[0x988d] + cs:[0x9899] - 0x800
+       wy    += sin[phase A] * speed >> 13      phase A += 1
+       wx    += cos[phase B] * speed >> 13      phase B += 2
+       angle += sin[phase C] >> 11              phase C += 2
+
+   THE ANGLE TERM SHIFTS UNSIGNED and the two position terms do not -
+   img 0x0e23 is `shr` against `sar` at 0x0ded and 0x0e0a. Reading all
+   three alike looks obviously right and is wrong: a negative sine
+   then gives a large positive turn instead of a turn the other way.
+
+   The statics are wx = wy = -0xa000, angle 0x100, scale 0x0b00, all
+   three phases zero, and both speed terms 0x400 [verified].
+
+THIS IS THE MOVER, AND NOTHING ELSE TOUCHES IT. A write watch on
+   0x9360 through the opening logs exactly two writers, img 0x0df1
+   and 0x0e0e, which are the two adds above [verified]. Thirteen
+   other sites reference the pair but none of them writes it here.
+
+   The speed in the opening is 0x600: cs:[0x988d] is 0x0a00 and
+   cs:[0x9899] is 0x0400, so 0x0a00 + 0x0400 - 0x800 [verified]. The
+   STATIC 0x400 in each makes it zero, so the camera does not move
+   until something has raised the first - one of the parameter
+   animators of subsystems/animation.txt.
+
+   THE HANDLER TICKS TWICE PER DISPLAYED FRAME [verified]. With
+   phase A at 0x2e and phase B at 0x5c the formula predicts a single
+   tick of dx +737 and dy +103; one frame moves the camera +1474 and
+   +206, which is exactly twice.
+
+   IT IS EXACTLY TWICE AND NOT ABOUT TWICE, because `and bx, 0x7fc`
+   quantises the phase to multiples of four: phase A stepping by one
+   and B by two both leave the table entry unchanged between the two
+   ticks of a frame, so the two contributions are identical. That
+   also fixes the fire text's threshold drift at two units a frame -
+   effects/firetext.txt section 6.1.
+
+   READ A HALTED GUEST, AND PROVE IT IS HALTED FROM THE REPLY. Pause,
+   read, dos_frames, read - two reads only bracket a known interval if
+   both are taken stopped.
+
+   `cont` ANSWERS `running`, AND A READ AFTER IT IS A READ OF A MOVING
+   MACHINE. A breakpoint takes time to be reached, so registers
+   sampled straight after releasing one can show any address at all,
+   including the middle of an interrupt dispatch - identical general
+   registers with esp down six words is that, not a landing. Wait for
+   a reply that says `halted pc=...` before believing a position.
+
+   The same trap reads memory: two samples of one buffer disagree
+   whenever either was taken while the guest ran on.
+
+8.3.  The steering tail, and why the countdown is still
+
+   THERE IS NO SEPARATE HANDLER AT img 0x0ee0. The landscape's flight
+   model at img 0x0e8e runs straight through it to img 0x0f2c - one
+   handler, disassembled end to end. Its tail steers the camera at
+   the target the head just moved:
+
+       eax = g_9368 - (sin(g_CamAngleNext) << 3)      img 0x0ef2
+       ecx = g_936c - (cos(g_CamAngleNext) << 3)      img 0x0eff
+       eax -= g_9360 ; ecx -= g_9364                  img 0x0f0c
+       g_9360 += eax >> 4 ; g_9364 += ecx >> 4        img 0x0f18
+       g_CamAngleNext -= 4                            img 0x0f2c
+
+   So the position takes a sixteenth of the remaining gap each tick
+   while the heading turns a steady -4 - an EASE, not a path, and it
+   converges. The head of the same handler integrates the target
+   itself, g_9460 and g_CamScale, through the rotation at img 0x4a22,
+   which is unread and is what stops the flight being reproduced.
+
+   THE COUNTDOWN'S CAMERA IS NOT FROZEN BY ANYTHING. Mode 1 at img
+   0x0e73 is four instructions - the burst counter, the two warp
+   offsets and the flame's cooling - and not one of them touches the
+   camera. The view simply holds wherever the flight left it, which
+   is what gives the particles a still background to restore from
+   (../effects/countdown.txt section 3.1).
+
+   Read out of the running demo at a countdown frame [observed]:
+
+   +--------------------+--------------+------------+
+   | Global             | Countdown    | At img     |
+   +====================+==============+============+
+   | camera x, y        | -376634,     | 0x9360/64  |
+   |                    | -192574      |            |
+   | g_CamAngleNext     | 0xfdaa       | 0x987d     |
+   | g_CamScale         | 0x0b88       | 0x9871     |
+   | g_9460             | 0x0a10       | 0x9460     |
+   | g_9368/6c target   | -401408,     | 0x9368/6c  |
+   |                    | -200704      |            |
+   +--------------------+--------------+------------+
+
+   The target is unmoved from its static value, so this scene's
+   flight has carried the camera, not the target.
+
+9.  The sky
+
+   THE RENDERER DRAWS IT LAST, img 0x37f5, not first [verified].
+   Every column fills from the top of the screen down to whatever the
+   terrain left in the y-buffer, one table entry per row, so the sky
+   is what the land did not cover rather than a background the land
+   is drawn over. A reconstruction that clears to black and stops has
+   no sky at all.
+
+   The table is 400 words at cs:0xb5dc, built once at img 0x00bb and
+   never rebuilt:
+
+       v = ((0x15e + i) >> 2) - 0x20, clamped to 0x40 .. 0x7e
+       word = (((v + 1) >> 1) << 8) | (v >> 1)
+
+   So each entry carries TWO ADJACENT PALETTE ENTRIES for an odd v
+   and the same one twice for an even one, and img 0x384d swaps the
+   halves on alternate frames - the same per-frame dither the terrain
+   columns use. The halving lands the band on palette 32 to 63, and
+   the clamp gives it a flat top and a flat bottom with the ramp
+   between.
+
+   WHERE IT STARTS IN THE TABLE IS THE HORIZON [verified]:
+
+       si = 0x226 - (g_CamScale >> 7) - 2 * g_SkyBias
+
+   clamped to 0 .. 0x31e. So the camera's height and the follower's
+   pitch at img 0x1faa both slide the whole gradient, which is what
+   keeps the horizon attached to the land instead of to the screen.
+
+10.  Open questions
+
+   o **Why g_WaterLevel at img 0xa598 sits in or beside the caption
+     strings.** Its value is not in doubt - a breakpoint on the test
+     at img 0x375e reads ch = 0x21 out of the register - but an
+     address that overlaps string data wants explaining before the
+     next person trusts it.
+
+   o **g_SliceDist's extent.** The builder at Demo_Entry img 0x005c
+     accelerates at 0x32 and 0x5a; where it stops has not been read,
+     so the slice count is known only as g_SliceCount at run time.
+
+   o **The 0x48 in the scale and the 0x2c in the horizon**, img 0x3683
+     and 0x3678. Both are screen-space constants and neither has been
+     related to the 200-row display.
+
+   o **maybe_Mapped_Render's actual effect.** A precomputed offset
+     table with a far cutoff and a point cloud over it. A tunnel is the
+     obvious guess and it is only a guess.

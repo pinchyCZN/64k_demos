@@ -1,0 +1,331 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                       LITHIUM: THE FLIGHT MODEL
+
+
+Abstract
+
+   What turns a recorded mouse path into a flying craft. Flight_Step
+   at 1000:59b7 runs once per slot per tick, immediately after every
+   Track_Play, in all three track handlers.
+
+   IT IS NOT ONLY THE FLIGHT MODEL. Its tail, from 1000:5dc0, is the
+   WEAPON: it fires a tracer every eighth tick and spawns fifty
+   explosion particles where the tracer meets the terrain -
+   effects/trail.txt section 5.
+
+   TWO THINGS ABOUT IT ARE WORTH KNOWING BEFORE THE DETAIL. Roll is
+   never recorded - it is derived from the yaw rate and levels itself.
+   And the track's two-bit packed field is a THROTTLE, which is the
+   whole of what the author's keyboard contributed to a recording
+   besides the mouse.
+
+   All [verified] from Flight_Step unless marked.
+   tracks.txt is the recording; objects.txt is the parameter bank.
+
+Table of Contents
+
+   1. Flight_Step
+   2. Roll comes free
+   3. The throttle
+   4. Vec_Rotate3_2
+   5. Flight_StepRoll, the other integrator
+   6. The link to the drawn position
+      6.1. Measured against the emulator
+      6.2. The command chain, and the chase cam
+   7. Open questions
+
+1.  Flight_Step
+
+   SI is the slot times four.
+
+       ax = g_SlotPitchAcc - g_SlotPitch         the pitch error
+       bx = g_SlotYawAcc   - g_SlotYaw           the yaw error
+       ax >>= 5;  bx >>= 5                       eased by a 32nd
+       g_SlotRoll  -= bx
+       g_SlotRoll  -= bx
+       g_SlotYaw   += bx
+       g_SlotPitch += ax
+       bx += bx;  g_SlotRoll -= bx
+       g_SlotRoll += (g_SlotRollRest - g_SlotRoll) >> 3
+
+       if g_SlotThrottle == 1:
+           rotate (0, 0, g_SlotSpeed) by pitch, then by yaw
+           >>= 7 and add to g_SlotFlight{X,Y,Z}
+       if g_SlotThrottle == 2:
+           the same with the speed negated
+
+   THE TRACK RECORDS RATES AND THIS TURNS THEM INTO FLIGHT.
+   Track_Play accumulates the recorded deltas into g_SlotPitchAcc and
+   g_SlotYawAcc; the attitude then chases those accumulators at a
+   thirty-second per tick, which is what makes a hand-flown mouse path
+   come out smooth rather than jittery.
+
+   The easing is the same shift-and-add idiom that appears everywhere
+   in this corpus - the palette fades, g_FocusEased, the cross-fade.
+
+2.  Roll comes free
+
+   g_SlotRoll is never written by the recording. Flight_Step
+   subtracts the eased yaw rate from it FOUR TIMES - twice, then twice
+   more via bx += bx - and then eases it back toward g_SlotRollRest by
+   an eighth.
+
+   SO A TURN BANKS AND LEVELS ITSELF WITH NO INPUT. Four times the
+   yaw rate is a hard bank, and the pull back toward the rest angle is
+   what stops it winding up.
+
+   XCURSION does the same trick the other way round, deriving yaw from
+   roll - ../../xcursion/effects/flight.txt. Both demos get banked
+   turns out of one axis of input.
+
+3.  The throttle
+
+   g_SlotThrottle at 1000:8db0 holds the two-bit field Track_Play
+   unpacks from byte 2 of each track entry:
+
+       0    coast - the attitude still changes, the position does not
+       1    forward
+       2    reverse
+
+   THAT IS WHAT THE RECORDED KEYBOARD WAS FOR. tracks.txt records the
+   six-bit key index and this two-bit mode as unexplained; this is the
+   consumer of the two-bit half.
+
+   The speed itself is g_SlotSpeed at 1000:8e46, which Obj_Reset sets
+   to 0xa, so a slot coasts at a fixed rate and the recording only
+   says whether it is moving.
+
+4.  Vec_Rotate3_2
+
+   1000:3799, a full three-axis Euler rotation on the SECOND angle
+   set: Z by g_RotAngle2Z, then X by g_RotAngle2X, then Y by
+   g_RotAngle2Y.
+
+   Each stage is the same g_SinTable sin/cos pair the single-axis
+   helpers use, but with SAR 6 on every product and another SAR 6
+   after each stage - so unlike Vec_RotZ, which leaves its products at
+   full scale for the caller to shift, this one stays in range as it
+   goes. That is what lets Flight_Step hand it a velocity and get a
+   usable vector back with no shifting of its own.
+
+   Flight_Step calls it twice, setting one angle and zeroing the other
+   two each time, so the velocity is rotated by pitch and then by yaw.
+
+5.  Flight_StepRoll, the other integrator
+
+   1000:61de. The same idea as Flight_Step's throttle section, with
+   two differences that matter:
+
+       Flight_Step      -> g_SlotFlight{X,Y,Z},  SAR 7
+       Flight_StepRoll  -> g_SlotHome{X,Y,Z},    SAR 0xb
+
+   SAR 0xb is a sixteenth of SAR 7, so this one creeps. And it adds
+   0x40 to the slot's roll every tick with nothing easing it back - a
+   full revolution every 32 ticks, which is a constant barrel roll
+   rather than a banked turn.
+
+   THAT IS WHY IT EXISTS. Tick_TowerFall points it at the tower's
+   slot, where a constant rotation about one axis is a building
+   turning over - effects/towerfall.txt section 3. Tick_PlayEight
+   also calls it.
+
+   IT ALSO CLOSES THE LINK BETWEEN FLYING AND BEING DRAWN.
+   Obj_LoadOrientA and B copy g_SlotHome* into g_SlotPos*, and
+   Obj_Select copies those into what Mesh_Transform reads, so a slot
+   driven by this routine reaches the screen.
+
+6.  The link to the drawn position and the drawn orientation
+
+   The last three lines of Flight_Step, at 1000:5d59:
+
+       g_SlotHomeY += (g_SlotFlightY - g_SlotHomeY) >> 5
+       g_SlotHomeX += (g_SlotFlightX - g_SlotHomeX) >> 5
+       g_SlotHomeZ += (g_SlotFlightZ - g_SlotHomeZ) >> 5
+
+   THAT IS THE WHOLE CONNECTION between flying and being drawn.
+   Flight_Step's throttle integrates into g_SlotFlight*; these ease
+   g_SlotHome* after it by a 32nd; Obj_LoadOrientA and B copy Home
+   into g_SlotPos*; Obj_Select hands those to Mesh_Transform.
+
+   THE LAG IS DELIBERATE. The drawn craft trails its own flight
+   position, so a hard turn makes the model swing wide and settle.
+
+   AND THE ORIENTATION TRAILS THE SAME WAY, four times faster -
+   1000:5d9b, immediately after:
+
+       g_SlotAngleAX += (g_SlotPitch - g_SlotAngleAX) >> 2
+       g_SlotAngleAY += (g_SlotYaw   - g_SlotAngleAY) >> 2
+       g_SlotAngleAZ += ((g_SlotRoll - g_SlotAngleAZ) >> 2)
+                         >> g_RollEaseShift
+
+   THAT IS WHAT TURNS THE CAMERA, and it is easy to miss because the
+   flight model writes the attitude into SET B while Obj_LoadOrientA
+   hands SET A to Mesh_Transform. Nothing else writes set A for a
+   flying slot, so leaving this out gives a camera that follows its
+   recorded path while barely rotating - which looks like a wrong
+   flight model and is not one.
+
+   ROLL TAKES AN EXTRA SHIFT from g_RollEaseShift at 1000:9026. The
+   flyover sets it to 2 at 1000:18a9 and clears it on the way out at
+   1000:1bd8, so the bank follows at a sixteenth there where pitch
+   and yaw follow at a quarter.
+
+   Two angles are eased the same way a quarter at a time, and just
+   before them comes a GROUND CLAMP:
+
+       if g_RecordMode == 0:
+           eax = Terrain_HeightAtSlot
+           if g_SlotFlightY < eax:  g_SlotFlightY = eax
+
+   It is SKIPPED WHILE RECORDING, so the author could fly through
+   terrain laying down a track and the replay would still ride the
+   surface.
+
+6.1.  Measured against the emulator
+
+   THE THREE ADDRESSES COMMAND 0x18 ADDS ITS OFFSET TO ARE SLOT 4'S
+   FLIGHT POSITION. cs:[0x895d], cs:[0x8c6d] and cs:[0x8995] are
+   g_SlotFlightX, Y and Z plus four, so the command positions itself
+   relative to the lead ship rather than to the world -
+   ../subsystems/objects.txt is the bank, and every array in it is
+   indexed by slot times four.
+
+
+   Two dumps of the whole parameter bank at consecutive entries to
+   Tick_SurfaceFlyover. Slot 0 is the only one flying
+   there - both ships coast with throttle 0 - and every field it
+   touches comes out of the transcription exactly [verified]:
+
+   +------------------+----------+---------+-----------+
+   | field            | before   | demo    | the port  |
+   +==================+==========+=========+===========+
+   | pitch            | 11       | 12      | 12        |
+   | yaw              | -65      | -70     | -70       |
+   | roll             | 129      | 130     | 130       |
+   | flight x delta   |          | +14     | +14       |
+   | flight z delta   |          | +287    | +287      |
+   | flight y         | 4160     | 4160    | 4160      |
+   +------------------+----------+---------+-----------+
+
+   The roll is the telling one: it is derived four times over from the
+   eased yaw rate and then pulled back an eighth, and 129 to 130 only
+   comes out right if all five steps are in the right order.
+
+   flight y holds still because the ground clamp pins it.
+   Terrain_HeightAtSlot at 1000:4107 indexes the map the way
+   Terrain_Height does, but it NEGATES the byte about sea level and
+   shifts left 7 with a bias of 0x40 rather than shifting left 3 -
+   object space runs the other way up and sixteen times coarser. The
+   live byte under the camera is 0x60, and -(0x60 - 0x80) << 7 plus
+   0x40 is 4160 exactly [verified].
+
+6.2.  The command chain, and the chase cam
+
+   Flight_Step TESTS THE TRACK'S SIX-BIT FIELD THIRTEEN TIMES,
+   between the throttle at 1000:59fe and the ground clamp at
+   1000:5d40: commands 1 to 8, 0xa, 0x17, 0x18, 0x19 and 0x1a, each
+   an independent compare that falls through to the next
+   [verified]. It is a small flight-control vocabulary, which is what
+   the recorded keyboard was for - ./tracks.txt.
+
+   WHICH ONES THE THREE TRACKS ACTUALLY USE, counted over their first
+   400 records [verified, decoded from the asset segment]:
+
+   +----------------+--------------------------------------------+
+   | camera, slot 0 | 0x18 ninety-nine times, 3 fifty-four, 2    |
+   |                | six, and 0xe, 0xf, 0x10 and 0x17 once each |
+   | ship, slot 4   | 6 forty-one times, 8 five times            |
+   | ship, slot 0xc | 0xb twice, 0xd, 0x13 and 0x15 once each    |
+   +----------------+--------------------------------------------+
+
+   THE REST OF THE VOCABULARY, all of it short [verified]:
+
+   +-----------+------------------------------------------------+
+   | 1         | raises 1000:8f63, the flyover's exit flag      |
+   | 2 and 3   | strafe right and left, roll +4 and -4          |
+   | 4 and 5   | flight y plus or minus speed << 4              |
+   | 6 and 7   | g_SlotRollRest minus or plus 0x20              |
+   | 8         | level g_SlotRollRest to the nearest 0x2000,    |
+   |           | eased a sixteenth, snapping when the step is 0 |
+   | 0xa..0x17 | SET THE SPEED to ((cmd - 9) * 2) - 1, so 1 to  |
+   |           | 27 in fourteen steps                           |
+   | 0x19      | g_SlotFiring = 1                               |
+   +-----------+------------------------------------------------+
+
+   SO COMMAND 1 IS HOW THE SCENE ENDS. The flyover's loop at
+   1000:1bce leaves when 1000:8f63 is set, and nothing else in the
+   runner raises it - the shot's length is in its own camera track,
+   not on a clock or an order boundary.
+
+   SO THE SHOT IS A CHASE AND COMMAND 0x18 IS WHAT MAKES IT ONE.
+   1000:5c64:
+
+       rotate (0, 0, -0x60) by this slot's pitch, then by its yaw
+       >> 6, and ADD SLOT 4'S FLIGHT POSITION
+       store that as this slot's flight position
+
+   It does not integrate, it OVERWRITES - so for a quarter of its
+   records the camera is pinned 96 units behind the lead ship along
+   its own facing. A port that only integrates the throttle drifts
+   away from the recorded path within seconds.
+
+   THE TRAIL DISTANCE IS 0x60 AND IT IS WRITTEN 0xffffffa0.
+   1000:5c89 is MOV ECX, 0xffffffa0, which is the byte 0xa0 sign
+   extended - value -0x60, not -0xa0. Read at face value the camera
+   sits five thirds too far back, and nothing in the flyover reaches
+   command 0x18 until a thousand ticks in, so the symptom is a
+   camera that holds the recorded path for most of the scene and
+   then slides off it mid-shot. The rotated offset is verified
+   against EAX, EBX and ECX at 1000:5cad, which hold
+   (303168, 32448, -249408) before the three shifts.
+
+   Command 3, the camera's other frequent one, is a strafe:
+   roll -= 4, then (-speed, 0, 0) rotated by pitch and yaw, >> 7, and
+   ADDED to the flight position. Command 0x19 just sets g_SlotFiring.
+
+   THE CLAMP READS THE GENERATED MAP AND NOTHING ELSE WILL DO. The
+   asset segment holds zeros where the heightmap goes until
+   Terrain_Generate fills it - ./terrain.txt section 5 - and a zero
+   byte pins Terrain_HeightAtSlot at -16320, far below any real
+   ground, so the camera sinks straight through the surface. That is
+   the whole of a bug that looked like bad flight integration.
+
+   WITH THE CHAIN AND THE RIGHT MAP IN PLACE THE CAMERA IS EXACT.
+   Compared against the emulator at a point matched on BOTH the track
+   pointer and g_SlotTrackTick - 40 records in and one tick past the
+   last - every field agrees: pitch 209, yaw -1381, roll -33,
+   pitch_acc -128, yaw_acc -1344, speed 10, roll_rest 2 and the
+   flight position (188958, -8912, 86688) [verified].
+
+   AND IT HOLDS DEEP INTO THE SHOT. At flyover tick 485, with the
+   camera swung round to yaw -2709 and roll 987, all sixteen compared
+   fields agree exactly - both angle sets, both positions, the
+   accumulators, the speed and the roll rest [verified].
+
+   COMPARE WHAT IS DRAWN, NOT ONLY WHAT IS COMPUTED. An earlier pass
+   checked the attitude, the accumulators and the flight position and
+   found them exact while the set-A easing was still missing
+   altogether - so the numbers agreed and the camera on screen did
+   not turn. Set A is what reaches Mesh_Transform and it has to be in
+   the comparison.
+
+   MATCHING THE RECORD IS NOT ENOUGH TO COMPARE. A record lasts six
+   ticks, so two states can share a track pointer and still be up to
+   five ticks apart, and the attitude eases a thirty-second per tick
+   throughout. Comparing on the record alone shows a few per cent of
+   apparent error in pitch, yaw and position that is nothing but that
+   offset; g_SlotTrackTick has to match too.
+
+7.  Open questions
+
+   o Throttle value 3 is untested by the routine, so it coasts like 0.
+
+   o Command 0x1a, at 1000:5cdd, which loads DI with 0x10 and is the
+     only one of the thirteen not transcribed. No track seen so far
+     uses it.
+
+   o Whether any track uses commands 0x04, 0x09 or 0x1a. The eight
+     battle tracks use none of them - effects/battle.txt section 3 -
+     and the other scenes' tracks have not been decoded.

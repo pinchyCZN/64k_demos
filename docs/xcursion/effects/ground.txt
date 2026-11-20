@@ -1,0 +1,236 @@
+PCDEMOS 64k                                            Analysis Note
+
+
+                 EXCURSION: THE SECOND LANDSCAPE
+
+
+Abstract
+
+   Ground_Render at 1000:341c, part sync 0x0a, runner Ground_Run at
+   1000:2621 - which calls it, then Mesh_Draw, then Vga_Present. So
+   the scene is a landscape with the craft over it.
+
+   IT IS A SECOND LANDSCAPE RENDERER, not a reuse of Voxel_Render. It
+   shares Voxel_Render's ray-start formula exactly, reads the same
+   256x256 heightmap, and applies the same water-band bias - but it
+   inverts the loop order and paints diagonal bands instead of
+   columns.
+
+   This was the last unread renderer in the demo.
+
+Table of Contents
+
+   1. The shared setup
+   2. The inverted loop
+   3. The reveal
+   4. The second pass
+   5. The part's own block
+      5.1. The sky bias is the ground ramp
+      5.2. It builds its own terrain
+   6. Open questions
+
+1.  The shared setup
+
+   img 0x341c calls Voxel_LatchCamera first, so it starts from
+   g_CamLatchX, g_CamLatchZ and the latched angle - the same per-frame
+   copies Voxel_Render reads [verified].
+
+       ES = 0x5a79  g_WorkSeg      DS = 0x4a79      FS = 0x2a79
+
+   NOTE THE SOURCE PAIR IS THE OPPOSITE WAY ROUND FROM Voxel_Render,
+   which takes its heightmap from 0x2a79 directly. Here 0x2a79 is only
+   the water test and the height comes from 0x4a79 - which is NOT a
+   heightmap at all but a SHADE MAP, built by Terrain_BuildShade at
+   1000:39d8 immediately before the part, img 0x023e. Section 3.
+
+   The distance parameter is the one thing it adds:
+
+       img 3431   g_GroundDist = 0x80 - g_GroundRamp, FLOORED AT 0x50
+
+   The mode 3 handler bumps g_GroundRamp every six ticks at img
+   0x0fe4, so the parameter ramps across the part and then sits at its
+   floor. See subsystems/animation.txt.
+
+   The ray start, img 0x3464 to 0x34ba [verified]:
+
+       step = g_CamScale / g_GroundDist
+       g_RayX = (sin - cos) * step * 16 * 1.25 + g_CamLatchX
+       g_RayZ = (cos + sin) * step * 16 * 1.25 + g_CamLatchZ
+       g_RayStepX = (cos * step) >> 2
+       g_RayStepZ = (sin * step) >> 2
+
+   The * 1.25 is assembled as eax + (eax >> 2) at img 0x3484 and
+   0x34ad - the same constant, built the same way, as
+   effects/voxel.txt records for Voxel_Render. The two routines were
+   plainly written from one another.
+
+2.  The inverted loop
+
+   THE LOOP ORDER IS THE OTHER WAY ROUND FROM Voxel_Render, and that
+   is the real difference between them [verified].
+
+       Voxel_Render     one COLUMN at a time, marching outward
+       Ground_Render    one DISTANCE BAND at a time, marching across
+
+   The outer loop at img 0x3445 counts g_GroundDist down to 1 and
+   recomputes the whole ray start each time. The inner loop at img
+   0x34e8 takes 160 samples.
+
+       img 34e8  si = (g_RayZ >> 0x10) | ((g_RayX >> 8) & 0xff00) -
+                 the same 256x256 index, from 16.16 coordinates
+       img 3516  AH = AL then a word store: 2 pixels per sample
+
+   AND THE SCREEN WALK IS DIAGONAL. img 0x3531 adds 2 to DI per sample
+   and another 0x140 every OTHER sample, so a pass paints a
+   45-degree band across 80 rows rather than one horizontal line.
+   Combined with the +/-45 degree ray start, the whole raster is
+   rotated.
+
+3.  The reveal
+
+   The colour, img 0x3501 [verified]:
+
+       al = shade[si] - g_GroundBias
+       if al >= 0x20: al = 0
+       if FS:[si] < 0x21: al += 0x20
+
+   THE SHADE MAP IS WHAT MAKES THE 0x20 TEST WORK. Terrain_BuildShade
+   clamps its output to 1..0x1e, so AL can only reach 0x20 or above by
+   UNDERFLOWING the subtraction - which happens exactly when the
+   shade is below g_GroundBias. The test is a threshold on brightness
+   dressed as a range check.
+
+   g_GroundBias is step >> 5, img 0x3456, so it tracks the distance
+   parameter: distant bands demand a brighter cell to show at all.
+
+   The +0x20 when the second field is below 0x21 is the water band
+   bias - the same device as Voxel_Render's +0x24, two bands apart.
+
+   Terrain_BuildShade itself, 1000:39d8 [verified]: per cell, the
+   horizontal gradient of the heightmap, times g_VoxHeightScale >> 6
+   which is 64, divided by g_ShadeDivisor - a fixed 0x53 = 83, never
+   written anywhere - plus 0x10, clamped to 1..0x1e. ONLY BL IS USED
+   FOR THE NEIGHBOURS so the x axis is a torus and no edge case is
+   needed. Its plate has the rest, including the sign flag parked in
+   the loop counter.
+
+   The divisor is tuned, not arbitrary: transcribed over a plasma, 36
+   of 65536 cells saturate. 64/83 is very nearly the value that fills
+   the 1..30 band without clipping.
+
+4.  The second pass, which paints black
+
+   img 0x355b onward lays a second diagonal sweep [verified]:
+
+       si = g_GroundBandSrc at cs:0xb8b8, read BACKWARD two bytes a
+       band
+       g_GroundDither++ each band, and img 0x3577 XCHGs AH and AL when
+       it is odd - a two-entry dither
+       the same diagonal DI walk, running the other way
+
+   NOTHING IN THE IMAGE WRITES g_GroundBandSrc [verified]. Every
+   cs-relative store and every immediate in 0xb700 to 0xb900 was
+   checked, and the only accesses in range are g_SpanBuf at 0xb8fc and
+   above, from Poly_Fill and Poly_FillFlat. The twelve routines that
+   point a data segment at CS all write 0xc7a4 or higher - the palette
+   region.
+
+   AND IT IS SCRATCH, NOT DATA. cs:0xb8b8 sits inside a 9122-byte run
+   of zeros from 0xa890 to 0xcc31 which holds every runtime-built
+   table in the demo: g_SqrTable at 0xaf7c, g_SpanBuf at 0xb8fc,
+   g_PolyVerts at 0xc57c and g_PaletteBase at 0xc7a4. The initialised
+   variable block ends at 0xa88f. So a zero there means UNINITIALISED,
+   not a deliberate value - and not a depack fault, since the same run
+   covers tables known to be filled at run time.
+
+   SO AX IS ALWAYS ZERO AND THE PASS WRITES BLACK. The dither is
+   inert, because XCHG AH, AL on 0x0000 does nothing.
+
+   The code is a two-tone dithered gradient fill; the effect is a
+   clear. Those are both true and the difference matters: you would
+   not read a table and dither it if black were the intent, so the
+   likeliest reading is a gradient - a sky band - that was cut, with
+   the fill left in because it still does something useful. That last
+   step is [inferred] and the table's name carries no "sky" for that
+   reason: it was g_GroundSkyTab and is now g_GroundBandSrc.
+
+5.  The part's own block
+
+   img 0x01a1 to 0x0247, the sync 0x0a part, and NOTHING HERE IS
+   CARRIED IN from the approach [verified]:
+
+   +-------------------+----------+--------------------------------+
+   | Global            | Value    | At img                         |
+   +===================+==========+================================+
+   | g_CamScale        | 0x400    | 0x020d                         |
+   | camera x, y       | 0        | 0x01f9, 0x0203                 |
+   | g_CamAngleNext    | 0        | 0x01f2                         |
+   | transform y       | 0x1c000  | 0x01b8                         |
+   | transform z       | 0x26000  | 0x01c2                         |
+   | g_ObjPitch        | 0xff00   | 0x01cc                         |
+   | g_ObjRoll         | 0x100    | 0x01da                         |
+   | g_LightRoll       | 0x200    | 0x01a1                         |
+   | g_GroundRamp      | 0xffb8   | 0x01eb                         |
+   | g_FadeEnable      | 1        | 0x0241                         |
+   | g_MusicPosTarget  | 0x0a     | 0x0247                         |
+   +-------------------+----------+--------------------------------+
+
+   THE SCALE IS THE ONE THAT MATTERS. 0x400 against the 14392 the
+   approach leaves behind, and because section 1's step is
+   g_CamScale / g_GroundDist, a small scale puts the horizon high and
+   the view looks DOWN at the ground. Carrying the approach's value
+   in pushes the horizon off the bottom of the screen and leaves a
+   frame of empty sky, which looks like a broken renderer and is a
+   wrong parameter.
+
+   g_GroundRamp starts NEGATIVE, so section 1's distance starts at
+   0xb8 rather than 0x80 and closes to its 0x50 floor as mode 3 bumps
+   it - that is the reveal. It is also why img 0x0fef's `jl` keeps
+   the launch on its slow fade: the same counter, read signed.
+
+5.1.  The sky bias is the ground ramp
+
+   img 0x3609, inside Voxel_LatchCamera, copies g_GroundRamp into
+   g_SkyBias EVERY FRAME [verified]. It is not a part parameter and
+   no part sets it for this scene.
+
+   So one counter does two jobs: section 1's distance closes as it
+   rises, and the horizon walks up with it. Measured together at one
+   frame of the running demo, a tick apart: ramp -52, bias -53
+   [observed].
+
+   THAT IS WHAT PUTS THE CRAFT IN FRAME. Mesh_Draw adds the bias to
+   every projected y at img 0x49f9, so with the ramp starting at -72
+   the craft sits mid-screen from the first frame of the part and
+   climbs as the ground is revealed. Pinning the bias to a constant
+   instead leaves the craft below the bottom edge for most of the
+   part and then far too close when it finally rises into view.
+
+5.2.  It builds its own terrain
+
+   img 0x022d regenerates the plasma with mask 0xfff, bias 0x800 and
+   roughness 2 - against the opening's 0x7fff, 0x4000 and 3 - and img
+   0x023e rebuilds the shade map from it. THE GROUND HERE IS NOT THE
+   LANDSCAPE THE OPENING FLEW OVER, and reusing the opening's field
+   gives the right shape over the wrong land.
+
+   It writes the same buffer, so every part after this one sees the
+   new field - the planet's surface included.
+
+6.  Open questions
+
+   o The INNER loop's exit at img 0x353e leaves only the inner loop -
+     JNC 0x3547 - and the distance loop keeps going. Getting that
+     wrong makes the renderer draw four pixels and stop, which is
+     worth stating because it looks like an outer-loop break.
+
+   o Which scene this is. sync 0x0a sits between the countdown and the
+     first planet, and the reported sequence has "a higher view of the
+     ship leaving the planet" there - effects/scenes.txt. The ramp
+     measurements in section 5 support it: the ground band shrinks from
+     127 rows to 80 as the ramp climbs, which is the view pulling
+     away.
+
+     The later "close-up rotating ground" in that same report is a
+     DIFFERENT scene; Ground_Render is called once and only at sync
+     0x0a. effects/scenes.txt section 4 has the sync 0x35 candidate.

@@ -1,0 +1,124 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!-- LITHIUM - the SDL2 target. One demo per executable: the
+     hosts plus this demo's sources. It links xcurpack.c where ukko
+     links pklite.c - a different packer, docs/layout.txt section 7.
+
+     NO CMAKE, deliberately - see ukko.vcxproj. -->
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32"><Configuration>Debug</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>15.0</VCProjectVersion>
+    <ProjectGuid>{ADCF6194-F278-4121-B38D-4DE58B238650}</ProjectGuid>
+    <RootNamespace>lithium</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.17134.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v141</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'=='Release'" Label="Configuration">
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)..\build\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)..\build\obj\lithium\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>lithium</TargetName>
+    <!-- The demo reads reverse/ghidra/LITHIUM.EXE by a relative path, so
+         debug from the repository root, not from src/. -->
+    <LocalDebuggerWorkingDirectory>$(ProjectDir)..</LocalDebuggerWorkingDirectory>
+    <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <!-- /TC compiles everything as C, not C++. MSVC has no C89
+           switch; emscripten's clang with -std=c89 -pedantic is what
+           actually catches the lapses, which is why tools/build_web.sh
+           is wired up from the start. -->
+      <CompileAs>CompileAsC</CompileAs>
+      <WarningLevel>Level4</WarningLevel>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)third_party\SDL\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <!-- shell32 is SDL2main's, for CommandLineToArgvW. -->
+      <AdditionalDependencies>SDL2.lib;SDL2main.lib;shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
+    <ClCompile><Optimization>Disabled</Optimization><RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary></ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
+    <ClCompile><Optimization>MaxSpeed</Optimization><FunctionLevelLinking>true</FunctionLevelLinking><IntrinsicFunctions>true</IntrinsicFunctions><RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary></ClCompile>
+    <Link><EnableCOMDATFolding>true</EnableCOMDATFolding><OptimizeReferences>true</OptimizeReferences></Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Platform)'=='Win32'">
+    <Link><AdditionalLibraryDirectories>$(ProjectDir)third_party\SDL\lib\x86;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories></Link>
+    <PostBuildEvent><Command>xcopy /D /Y "$(ProjectDir)third_party\SDL\lib\x86\SDL2.dll" "$(OutDir)"</Command></PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Platform)'=='x64'">
+    <Link><AdditionalLibraryDirectories>$(ProjectDir)third_party\SDL\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories></Link>
+    <PostBuildEvent><Command>xcopy /D /Y "$(ProjectDir)third_party\SDL\lib\x64\SDL2.dll" "$(OutDir)"</Command></PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <!-- Vendored and not ours to tidy: /W4 flags narrowing
+         that its own -ansi -pedantic -Wall build accepts. -->
+    <ClCompile Include="third_party\ibxm\ibxm.c">
+      <WarningLevel>Level1</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="main_sdl.c" />
+    <ClCompile Include="xcurpack.c" />
+    <ClCompile Include="lithium\lithium_demo.c" />
+    <ClCompile Include="lithium\lithium_tables.c" />
+    <ClCompile Include="lithium\lithium_mesh.c" />
+    <ClCompile Include="lithium\lithium_scene.c" />
+    <ClCompile Include="lithium\lithium_raster.c" />
+    <ClCompile Include="lithium\lithium_tex.c" />
+    <ClCompile Include="lithium\lithium_text.c" />
+    <ClCompile Include="lithium\lithium_state.c" />
+    <ClCompile Include="lithium\lithium_shadow.c" />
+    <ClCompile Include="lithium\lithium_bump.c" />
+    <ClCompile Include="lithium\lithium_dust.c" />
+    <ClCompile Include="lithium\lithium_bumpscene.c" />
+    <ClCompile Include="lithium\lithium_shatter.c" />
+    <ClCompile Include="lithium\lithium_approach.c" />
+    <ClCompile Include="lithium\lithium_battle.c" />
+    <ClCompile Include="lithium\lithium_towerfall.c" />
+    <ClCompile Include="lithium\lithium_greetings.c" />
+    <ClCompile Include="lithium\lithium_figure.c" />
+    <ClCompile Include="lithium\lithium_player.c" />
+    <ClCompile Include="lithium\lithium_trail.c" />
+    <ClCompile Include="lithium\lithium_tunnel.c" />
+    <ClCompile Include="lithium\lithium_layout.c" />
+    <ClCompile Include="lithium\lithium_flare.c" />
+    <ClCompile Include="lithium\lithium_sky.c" />
+    <ClCompile Include="lithium\lithium_flyover.c" />
+    <ClCompile Include="lithium\lithium_flight.c" />
+    <ClCompile Include="lithium\lithium_look.c" />
+    <ClCompile Include="lithium\lithium_game.c" />
+    <ClCompile Include="lithium\lithium_terrain.c" />
+    <ClCompile Include="lithium\lithium_music.c" />
+    <ClCompile Include="lithium\lithium_rockintro.c" />
+    <ClCompile Include="lithium\lithium_logo.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="pd.h" />
+    <ClInclude Include="host.h" />
+    <ClInclude Include="xcurpack.h" />
+    <ClInclude Include="lithium\lithium.h" />
+    <ClInclude Include="lithium\lithium_assets.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

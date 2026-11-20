@@ -1,0 +1,322 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                   EXCURSION: THE ROTOZOOMER
+
+
+Abstract
+
+   Roto_Render at 1000:2f28, runner Roto_Run at 1000:25b5. One
+   renderer serves two scenes that look nothing alike: the "HUI"
+   cuts at sync 0x0c, and the plasma rotozoom at sync 0x26.
+
+   THE LETTERS ARE NOT DRAWN OVER THE EFFECT. Text_BuildBanner
+   blends them INTO the 256x256 field before the part begins, so the
+   rotozoom turns them with everything else. That is the whole trick
+   and it is why the word rotates rather than sitting on top.
+
+Table of Contents
+
+   1. The renderer
+   2. Why it looks soft
+   3. The banner
+   4. The part, and the cut
+      4.1. It runs twice, with a cut of stars between
+      4.2. And a third time, on a plasma
+   5. Open questions
+
+1.  The renderer
+
+   img 0x2f28, once per frame [verified]:
+
+       zoom  = g_RotoZoom   at img 0x94bc
+       angle = g_RotoAngle  at img 0x9961
+       du = (sin(angle) * zoom) >> 12            img 0x2f4c
+       dv = (cos(angle) * zoom) >> 12            img 0x2f5a
+
+       u = -160 * du + 100 * dv                  img 0x2f62
+       v = -160 * dv - 100 * du
+
+   So the start is the texture coordinate of the screen's top left
+   carried through the same rotation, and img 0x2f62 assembles both
+   out of shifts and adds rather than a multiply - 32 plus 128 for
+   the 160, 4 plus 32 plus 64 for the 100.
+
+   The texel is addressed by the HIGH BYTES of the two accumulators,
+   img 0x2fd1, so the field is 256x256 and wraps for free.
+
+   The destination is two segments, img 0x98b7 and img 0x98b5 - the
+   work buffer and 0xa000 itself. A reconstruction with one
+   framebuffer writes once.
+
+2.  Why it looks soft
+
+   TWO THINGS, AND NEITHER IS A SIDE EFFECT.
+
+   IT DRAWS A QUARTER OF THE PIXELS A RENDER. The walk is 160 by 100,
+   stepping two across and two down, and img 0x2fa0 offsets the
+   start by a pixel in x, a row in y, or both, from the low two bits
+   of its own counter at img 0xa87b. Four renders cover the screen, so
+   parts of the image are always a render or two old.
+
+   SO HOW OFTEN IT RENDERS IS PART OF THE EFFECT, not a performance
+   detail. Roto_Run waits a tick per render at img 0x25b8 and the
+   animation modes run every other tick, which would be two renders an
+   animation pass if the render kept up; Roto_Render's 32000 byte
+   writes do not, and THE MEASURED RATE IS ONE RENDER PER PASS - zoom
+   868 to 660 against g_RotoPhase 2 to 6, four passes and four renders
+   [observed].
+
+   Halving that doubles how much rotation the four-phase interleave
+   spans. Adjacent columns then differ by two passes of angle instead
+   of one, and the result combs rather than resolving - most visible
+   at the end, where the freeze is supposed to let the blend converge
+   and stamp the word.
+
+   AND IT BLENDS RATHER THAN WRITES. img 0x2fd5:
+
+       new = old + ((texel - old) >> g_RotoBlend)
+
+   with g_RotoBlend 2 at img 0xa59d, so each pass moves a quarter of
+   the way toward the new texture. The subtraction is a BYTE one and
+   the shift is signed, so the step is signed in both directions.
+
+   Together they give the smeared spiral the scene is known for.
+   Writing the texel straight gives a hard, flickering rotozoom that
+   is recognisably the wrong effect.
+
+   WITH THE RATE RIGHT THE WHOLE EFFECT IS EXACT. src/ matches the
+   demo's screen byte for byte across 128 pixels of row 100 at order
+   0x0c row 0x17 [observed], which covers the texture, the banner
+   blended into it, the blend, the interleave, the phase and both
+   animated terms at once.
+
+3.  The banner
+
+   img 0x33a0 Text_BuildBanner, and it writes to the CALLER'S
+   segment, which at img 0x0316 is the field at 0x2a79 [verified].
+
+   img 0x33ec halves what is already there and adds g_BannerBright,
+   0x3f at img 0xa59e, so a glyph is a lightened copy of the field
+   beneath it and carries the texture with it.
+
+   It takes a record of the same shape the caption masks use - text
+   pointer, destination offset, row count - through a pointer at img
+   0x98bb, which holds img 0x97d1: the text at img 0xa588, "  HUI!  ",
+   one line at offset 0xef80. Eight glyphs to a line at img 0x33b6,
+   32 pixels apart, and a row strides 0x100 because the field is 256
+   wide.
+
+4.  The part, and the cut
+
+   img 0x02ec, sync 0x0d, runner Roto_Run:
+
+       g_RotoZoom  = 0x400                        img 0x02ec
+       g_RotoAngle = 0                            img 0x02f6
+       g_AnimMode  = 5                            img 0x02fd
+       g_FadeLevel = 0                            img 0x0303
+       Pal_BuildBlue, Pal_Fade                    img 0x030d, 0x0310
+       HALVE EVERY BYTE of the field              img 0x0322
+       clear the work segment
+       Text_BuildBanner                           img 0x0335
+
+   THE CUT IS THE MUSIC AND NOTHING ELSE. Mode 5 at img 0x1093 tests
+   g_MusicRow, the row counter inside the current pattern:
+
+       row <= 0x18 : zoom -= 0x34, angle += 0x18
+       otherwise   : fade -= 0x100 and Pal_Fade
+
+   THE TICK RATE IS NOT 6 HERE. g_TicksPerRow reads 3 by this part
+   [observed], so a row is three sequencer ticks and six animation
+   ones - the modes run on every timer tick and the sequencer on
+   every other. Rows 22 to 24 are therefore about eighteen passes of
+   mode 5, not the thirty-six a rate of 6 would give.
+
+   IT INHERITS THE COUNTER AT 22, NOT 0. The part before this one
+   ends on Planet_Render's row condition - section 4.1 - which fires
+   exactly at g_9917, 0x16. So mode 5 has only the three rows from 22
+   to 24 to turn in, about thirteen ticks, and then everything
+   freezes [observed: zoom 0x400 to 348, angle 0 to 312, in ten
+   frames from the part's first].
+
+   THE FREEZE IS WHAT STAMPS THE WORD. While the angle moves, the
+   blend in section 2 never catches up and the field stays smeared.
+   The moment it stops the same blend converges on the texture within
+   a few frames, so the letters resolve hard out of the smear and
+   then the fade takes them. Rotate, stop, stamp, fade - in that
+   order, and all of it out of one counter.
+
+   A part entered with the counter at 0 instead turns for the full 24
+   rows. The zoom runs to about -6500 by then, which tiles the field
+   some thirty times across, and the letters never resolve - the
+   effect reads as noise that happens to be blue.
+
+   The zoom falls by 0x34 a tick from 0x400 and would pass through
+   zero after about twenty ticks, mirroring the field beyond it. It
+   does not get that far here: the freeze lands it around 200 to 350,
+   which is roughly one copy of the field across the screen and is
+   why the letters come out full size.
+
+4.1.  It runs twice, with a cut of stars between
+
+   THE PART ENDS ON ITS SYNC AND THAT MATTERS. Left running past it
+   the zoom keeps falling, the field tiles finer every tick and the
+   letters go with it, so the scene is only legible inside its own
+   pattern. Three parts in a row [verified]:
+
+   +-------+------+-------+---------------------------------------+
+   | At img| Sync | Mode  | What it is                            |
+   +=======+======+=======+=======================================+
+   | 02ec  | 0x0d |   5   | the first roto. Blue palette, the     |
+   |       |      |       | field halved, the banner blended in   |
+   +-------+------+-------+---------------------------------------+
+   | 0342  | -    |   4   | a cut of the craft against stars,     |
+   |       |      |       | ball off at 0xfa000                   |
+   +-------+------+-------+---------------------------------------+
+   | 03b4  | 0x0e |   5   | the second roto, angle 0x100. It      |
+   |       |      |       | clears only the work buffer, so the   |
+   |       |      |       | letters from the first are still in   |
+   |       |      |       | the field                             |
+   +-------+------+-------+---------------------------------------+
+
+   THE STAR CUT HAS NO SYNC OF ITS OWN. Planet_Render loops on two
+   conditions, img 0x29ad and img 0x29ba - the order AND the row
+   counter against g_9917, which the part sets to 0x16. The order is
+   already past its target, so the burst lasts a fixed 22 rows and
+   then the second roto takes over.
+
+   The letters read best on the SECOND pass. The first begins at
+   angle 0 with the zoom at its most tiled, and the second starts
+   fresh at 0x100 with the field already carrying the glyphs.
+
+   Both entry states read out of the running demo, one to three
+   ticks in [observed]: the first at row 22, zoom 0x400, angle 0;
+   the second at row 22, zoom 868 and angle 328, which is 0x100 plus
+   three ticks of 0x18.
+
+   EVERY ONE OF THESE PARTS CLEARS THE SCREEN - img 0x030a, 0x039a
+   and 0x03cb. The star cut's clear is the one that matters most: it
+   rebuilds the full palette, so a frame left holding the
+   rotozoom's pixels would be shown through the land and water bands
+   and the blue scene turns brown on its way out.
+
+   THE SECOND PASS MUST STOP AT ITS SYNC. Nothing in mode 5 bounds
+   the effect by itself, so a part left running sees the pattern
+   roll over, the row counter reset to zero, and the full 24-row
+   turn start again from whatever zoom it had reached - a long smear
+   that belongs to no part at all.
+
+4.2.  And a third time, on a plasma
+
+   img 0x07b0, sync 0x26, mode 0xe, the same Roto_Run [verified]:
+
+       g_RotoZoom = 0x30c, g_RotoAngle = 0        img 0x07b0
+       g_AnimMode = 0xe                           img 0x07c1
+       g_FadeLevel = 0, Pal_Fade                  img 0x07c7
+       Pal_BuildBlueCyan                          img 0x07ce
+       rough 1, bias 0x800, mask 0xfff            img 0x07d9
+       Plasma_Generate                            img 0x07ed
+       HALVE EVERY BYTE, and clear the work       img 0x07fa
+       g_MusicPosTarget = 0x26                    img 0x080c
+       Roto_Run                                   img 0x0813
+       Tunnel_BuildDepth                          img 0x0816
+
+   MODE 0xe IS MODE 5 AT A FORTIETH OF THE SPEED - two off the zoom
+   and two onto the angle a pass against 0x34 and 0x18 - so this one
+   drifts where the banner scenes spiral. The fade at img 0x15b7 only
+   arrives once the order reaches the target, so it is the last pass
+   or two.
+
+   THE HALVING AND THE HALF-PALETTE ARE ONE DECISION. Pal_BuildBlueCyan
+   at 1000:3bf4 writes only entries 0..127, black to blue to cyan, and
+   leaves 128..255 as the warp part's palette left them. img 0x07fa
+   shifts every byte of the field right one, so nothing ever indexes
+   the upper half. Reading the half-build as unfinished, or leaving the
+   field full-range, each break the other.
+
+   Clearing the work buffer in the same pass is what gives the blend
+   black to converge out of, so the plasma rises rather than cutting
+   in.
+
+   THE PLASMA DEPENDS ON THE BATTLE. It is the fifth draw on the shared
+   stream and the fourth was the warp's, two scenes back - and between
+   them the glow's particles draw unparked. Measured, the stream
+   advances 1536 between them: 512 from mode 0xc's trickle, 64 for the
+   warp-out burst, and 64 for each of fifteen hits in the formation
+   fight [observed]. Get the hit count wrong and this part gets a
+   different cloud. effects/script1_landscape.txt section 6.1.
+
+   Tunnel_BuildDepth at img 0x0816 belongs to the part that follows,
+   not to this one - it fills two 64000-byte radial tables while the
+   screen is already cleared.
+
+5.  Roto_RunWithMesh, and the buffer that moves
+
+   Roto_RunWithMesh at img 0x25f7 is the renderer with a craft over
+   it [verified] - Roto_Render, Mesh_Draw, Vga_Present, then
+   Demo_WaitTick, so it renders ONCE PER TIMER TICK rather than flat
+   out. Its one part is img 0x4e97, sync 0x35, mode 0x15: the moon's
+   own surface seen from just behind the craft.
+
+   THE RENDERER HAS TWO DESTINATIONS AND READS BACK FROM ONLY ONE.
+   img 0x2fe0 stores the blend through DS and img 0x2fe2 stores it
+   again through FS, but img 0x2fd8 takes the OLD value through DS
+   alone. DS comes from cs:0x98b7 and FS from cs:0x98b5, so one of
+   them is the feedback the blend accumulates in and the other only
+   ever receives a copy.
+
+   Their statics are FS = 0xa000 and DS = 0x5a79 [verified] - the
+   feedback in the work buffer, the copy straight to the screen - and
+   every earlier rotozoom runs on those, which is why the two read as
+   one buffer everywhere else.
+
+   THIS PART SWAPS THEM, img 0x4e9a and img 0x4f51: DS becomes 0x7a79
+   and FS the work buffer. It is the only rotozoom with a craft drawn
+   over it, and Mesh_Draw writes the work buffer - so leaving the
+   feedback there would blend the craft into the surface and smear it
+   across the following frames. Moving the accumulator to a buffer
+   nothing else writes is what keeps the craft off its own trail.
+
+   0x7a79 is the tunnel's eighth-scale depth table, finished with by
+   now; img 0x4f2e clears it and the work buffer in the same pass
+   that copies the shade map into the texture. That copy is PLAIN -
+   the moon's part transforms the same map through (v << 2) + 0x80 on
+   its way across and this one does not, so the two parts put
+   different things in 0x2a79 from the same source.
+
+   THE BLEND SHIFT IS A GLOBAL, NOT A CONSTANT. cs:0xa59d is 2 by
+   static and this part sets it to 1 at img 0x4f58, which doubles the
+   step each pass takes toward the new texture - a surface that
+   settles twice as fast, because this one is moving under the
+   camera rather than turning in place.
+
+   MODE 0x15 CARRIES BOTH HALVES OF THE CUT. It climbs g_FadeLevel
+   back to 0 by 0x100 a tick from wherever mode 0x14's fade-out left
+   it, and past row 0x3c drives it down again - so one handler fades
+   the part in and out, and the moon before it fades out through the
+   same arithmetic running in mode 0x14.
+
+   Only the climb reaches the screen: img 0x17cb leaves for the ISR
+   tail without calling Pal_Fade, where the climb calls it at img
+   0x17df. Mode 0x14's fade-out does call it, at img 0x178b. The
+   level therefore keeps falling at the end of this part while the
+   palette stops following it.
+
+6.  Open questions
+
+   o THE PART'S ENTRY COSTS RENDERS AND THE RECONSTRUCTION'S DOES
+     NOT. img 0x07ed's generate is 0x10000 random draws and the
+     halving loop another 0x10000 iterations, and mode 0xe keeps
+     advancing the zoom throughout - so the demo is about twelve
+     passes along with only about six renders done, and its rotation
+     leads its convergence by that much. src/ enters instantly and
+     reaches the same zoom with twice the renders, which shows as a
+     plasma that has resolved further at the same angle. Measured:
+     zoom 0x2f4 at order 0x25 row 2, screen row 100 running
+     00 04 03 05 ... against src/'s 0a 08 10 14 ... [observed]. The
+     lead is machine speed, not code, so nothing here is tuned to it.
+
+   o What follows the second roto. img 0x03ee sets mode 6, rebuilds
+     the plasma at mask 0x7ff, bias 0x400, roughness 1, takes the
+     blue-purple palette and runs img 0x2639 - Warp_RenderFull - to
+     sync 0x12. That is the plasma scene and it is not ported.

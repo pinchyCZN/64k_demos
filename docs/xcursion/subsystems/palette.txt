@@ -1,0 +1,201 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                        EXCURSION'S PALETTE
+
+
+Abstract
+
+   A 768-byte buffer in the code segment, written by a family of nine
+   builder routines and pushed to the DAC by one. The buffer is BUILT
+   AT RUNTIME and is therefore all zeros in the depacked image.
+
+   Its layout is the demo's colour design, and the one fact to take
+   away is that indices 96 to 191 are a 96-entry black-red-yellow-white
+   FIRE ramp. Any flame in this demo indexes that band.
+
+Table of Contents
+
+   1. The shape of it
+   2. Pal_BuildMain's bands
+   3. The fade
+   4. The one that bypasses everything
+   5. Band transforms: how data is aimed at a band
+   6. How the fire band is reached
+   7. Open questions
+
+1.  The shape of it
+
+   +--------------------+-----------------------------------------------+
+   | Thing              | Where                                         |
+   +====================+===============================================+
+   | g_PaletteBase      | 1000:c7a4, 768 bytes, 256 x RGB, 6-bit        |
+   | Pal_Fade           | 1000:3b17, the only DAC write from the buffer |
+   | Pal_BuildMain      | 1000:3b65, the main seven-band palette        |
+   | Pal_BuildGreyLow   | 1000:3e79, a 32-entry band override           |
+   | Pal_SetRgbRamps    | 1000:3e31, writes the DAC DIRECTLY            |
+   | maybe_Pal_Build2-8 | 3bf4, 3c1d, 3cac, 3d1e, 3df6, 3ed4, 3f1e      |
+   | g_FadeLevel        | 1000:97dd, signed, -0x4000 .. +0x4000         |
+   +--------------------+-----------------------------------------------+
+
+   Nine routines write g_PaletteBase and one reads it [verified, from
+   the ten references to 0xc7a4 in the code: one `mov si` in Pal_Fade
+   and nine `mov di` in the builders].
+
+   **BUILDERS COMPOSE.** Pal_BuildGreyLow writes 32 entries and leaves
+   the other 224 alone, over whatever Pal_BuildMain put there. So the
+   palette is a buffer with several authors in sequence, not one
+   function's return value, and reading any single builder tells you
+   only about the band it touches.
+
+   **g_PaletteBase IS ZERO IN THE DEPACKED IMAGE** and that is not a
+   depack fault. The dump is taken at the handoff RETF, before the demo
+   has executed an instruction, so anything the demo COMPUTES is zero
+   in it - this palette, the plasma buffers, the height fields.
+
+   THAT IS NOT THE SAME AS "the variable block is BSS".
+   img 0x9368-0xa888 is INITIALISED DATA - 4423 of its 5408 bytes
+   are non-zero in the dump - so
+   g_VoxHeightScale, g_WaterLevel and the rest have real starting
+   values that can simply be read. g_PaletteBase at img 0xc7a4 sits
+   outside that block and genuinely is zero. Check the dump before
+   concluding a global has no value.
+
+2.  Pal_BuildMain's bands
+
+   1000:3b65 [verified]. Six bands of 32 then one of 64:
+
+   +---------+----------------+----------------+----------------+--------------------+
+   | Index   | R              | G              | B              | What               |
+   +=========+================+================+================+====================+
+   |   0- 31 | bl             | bl >> 1        | bl >> 2        | brown - the land   |
+   |  32- 63 | bl >> 2        | bl >> 1        | bl             | blue - the water   |
+   |  64- 95 | (bl>>2) + 0x10 | (bl>>1) + 0x20 | 0x3f           | pale blue to white |
+   |  96-127 | bl             | 0              | 0              | black to red       |
+   | 128-159 | 0x3f           | bl             | 0              | red to yellow      |
+   | 160-191 | 0x3f           | 0x3f           | bl             | yellow to white    |
+   | 192-255 | n              | n              | n              | greyscale          |
+   +---------+----------------+----------------+----------------+--------------------+
+
+   bl steps by 2 across a 32-band, so a component reaches 62 of the
+   DAC's 63 and the band never quite saturates. In the 64-band n steps
+   by 1 and does reach 63. That asymmetry is the code's.
+
+   **96 TO 191 IS A FIRE RAMP** - black, red, yellow, white, 96 entries
+   of it. It is the largest single run in the palette and nothing else
+   in the layout needs three bands. 0-31 brown and 32-63 blue match a
+   landscape with water.
+
+3.  The fade
+
+   Pal_Fade at 1000:3b17 is the ONLY path from g_PaletteBase to the
+   hardware [verified]. It adds `g_FadeLevel >> 8` to every one of the
+   768 components, saturating at 0 and 0x3f.
+
+   So a fade is a signed BRIGHTNESS OFFSET, not a multiply: -0x4000
+   gives full black, 0 gives the palette as built, +0x4000 gives full
+   white. Out-of-range values reload g_FadeLevelPrev rather than
+   clamping to the bound, which means a wild value leaves the previous
+   frame's fade standing instead of snapping to an extreme.
+
+   Both ends are used. Demo_Timeline sets g_FadeLevel to 0x3d80,
+   0x2d00, 0x3c00 and 0x4000 - all white-outs - and to 0 to come back.
+
+   Nothing in Pal_Fade ramps g_FadeLevel: it writes the value back
+   unchanged at img 0x3b32 and 0x3b37. Whatever animates a fade is
+   elsewhere and is section 6.
+
+4.  The one that bypasses everything
+
+   Pal_SetRgbRamps at 1000:3e31 writes the DAC directly and never
+   touches g_PaletteBase [verified]. Four bands of 64:
+
+         0- 63   (0, 0, bl)          black to blue
+        64-127   (0, bl, 0x3f)       blue to cyan
+       128-191   (bl, 0x3f, 0x3f)    cyan to white
+       192-255   (0x3f, 0x3f, 0x3f)  flat white
+
+   Pal_BuildBluePurple at 1000:3cac is the moire's and the sync 0x0e
+   part's [verified]. SIX bands, and CYCLIC - index 0 and 255 are both
+   black:
+
+       0.. 63  64  R 0,      G 0,      B n        black -> blue
+      64.. 95  32  R n,      G 0,      B 0x3f     blue -> purple
+      96..127  32  R 0x3f,   G n,      B 0x3f     purple -> white
+     128..159  32  R 0x3f,   G n down, B 0x3f     white -> purple
+     160..191  32  R n down, G 0,      B 0x3f     purple -> blue
+     192..255  64  R 0,      G 0,      B n down   blue -> black
+
+   NO ENTRY HAS R ABOVE B, so nothing in it can read red - R only
+   rises while B is full, which gives purple. The symmetry is for
+   Moire_Render, whose mod-256 wrap would show a hard edge under any
+   palette whose ends did not meet. effects/moire.txt section 5.
+
+   Pal_BuildBlueMagenta at 1000:3df6 is the other override, and it is
+   THE TUNNEL'S [verified]. Three bands of 64 into g_PaletteBase, and
+   IT STOPS AT 192 so the greyscale survives:
+
+       0.. 63   R 0, G 0, B n        black -> blue
+      64..127   R n, G 0, B 0x3f     blue  -> magenta
+     128..191   R n, G 0, B n, with n COUNTING DOWN from 0x3f
+                                     magenta -> black
+
+   Band 3 counting down closes the ramp back to black, which is what
+   makes the tunnel's depth wrap read as repeating rings rather than
+   one gradient. Called at img 0x0901, right after Pal_BuildMain and
+   right before Tunnel_BuildAngle - and the demo shows that tunnel in
+   blue and magenta [observed, and explained].
+
+   A cold ramp with no fire band at all. The consequence of bypassing
+   the buffer is that the next Pal_Fade call wipes it, replacing all
+   256 entries with whatever g_PaletteBase still holds - so this is for
+   a passage that does not fade while it is on screen.
+
+5.  Band transforms: how data is aimed at a band
+
+   An effect's data is 0..255, and the palette is banded, so the data
+   has to be mapped into the band it wants. Demo_Timeline does that
+   with a byte transform over the whole 64 KB buffer after generating
+   it [verified]:
+
+       img 4e70   (v << 2) + 0x80
+       img 5108   (v >> 2) + 0x20     -> 0x20..0x5f, the blue band
+       img 5376   (v >> 3) + 0xe0     -> 0xe0..0xff, the top of grey
+       img 4f96   clamp below 0x10
+       img 5176   clamp below 0x10
+
+   This is why a generator's raw output looks nothing like any scene:
+   the plasma spans all 256 indices and therefore all seven bands, and
+   the transform is what picks one. A reconstruction that draws a
+   generator's bytes straight to a palette-indexed screen is showing
+   the data, not the effect.
+
+6.  How the fire band is reached
+
+   NEITHER FIRE USER USES A PALETTE TRANSFORM, which is why searching
+   for a 96..191 mapping finds nothing.
+
+   Fire_Particles at 1000:3873 forces every pixel it touches into
+   96..191 with a pair of compares at img 0x397c and 0x3982, then
+   ADDS heat - so accumulation reads as heating up through the ramp.
+
+   The other `add al, 0x60` site, img 0x23ba, is FireText_Render,
+   which reaches the band by a THRESHOLD instead.
+
+   Only the blue and grey bands are reached by a transform.
+
+7.  Open questions
+
+   o **What animates g_FadeLevel.** Pal_Fade does not, and a white-out
+     that never comes back is not what the demo does. Some per-frame
+     routine must ramp it; it is not located.
+
+   o **The other seven builders**, maybe_Pal_Build2 through 8 at
+     1000:3bf4, 3c1d, 3cac, 3d1e, 3df6, 3ed4 and 3f1e. Each writes
+     g_PaletteBase; which band and which colours is unread. The fire
+     band's own builder may well be among them, since Pal_BuildMain
+     lays it down but something has to cycle or rebuild it for a flame
+     to move.
+
+   o **Whether Pal_SetRgbRamps is ever followed by a fade**, which
+     would make its palette momentary. Its caller is unexamined.

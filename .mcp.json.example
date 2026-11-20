@@ -1,0 +1,44 @@
+{
+  "_comment": [
+    "Copy to .mcp.json and replace every <...> with a real path.",
+    ".mcp.json itself is gitignored: it names one machine's layout,",
+    "and two of these servers live outside this repository.",
+    "",
+    "ghidra     the bridge to a running Ghidra. GHIDRA_MCP_URL MUST",
+    "           be the port this project's server is on - a write",
+    "           against another project's database corrupts it, and",
+    "           the variable overrides the bridge's own discovery.",
+    "           tools/gq.py addresses the port directly and refuses",
+    "           any project but 64k_demos; prefer it. CLAUDE.md 2.1.",
+    "dos-dbg    the DOSBox debugger bridge. Outside this repo.",
+    "64k-demo-dbg   the port's own debug agent - tools/agent/,",
+    "           docs/agent.txt. The only one that lives in here."
+  ],
+  "mcpServers": {
+    "ghidra": {
+      "type": "stdio",
+      "command": "<path to python.exe>",
+      "args": [
+        "<path to bridge_mcp_ghidra.py>"
+      ],
+      "env": {
+        "GHIDRA_MCP_URL": "http://127.0.0.1:8090/",
+        "GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS": "all"
+      }
+    },
+    "dos-dbg": {
+      "type": "stdio",
+      "command": "<path to python.exe>",
+      "args": [
+        "<path to the DOSBox debugger mcp_server.py>"
+      ]
+    },
+    "64k-demo-dbg": {
+      "type": "stdio",
+      "command": "<path to python.exe>",
+      "args": [
+        "<path to this repo>/tools/agent/mcp_server.py"
+      ]
+    }
+  }
+}

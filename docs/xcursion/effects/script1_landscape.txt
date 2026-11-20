@@ -1,0 +1,455 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                 EXCURSION, SCRIPT 1: THE OPENING
+
+
+Abstract
+
+   Demo_Timeline at XCURSION_U.EXE 1000:4d6e is the back half of the
+   demo's timeline: ten parts, each a block of parameters followed by
+   one renderer that loops until the music reaches a position. It is
+   not a frame loop and it is not an effect.
+
+   It is tail-jumped into from Demo_Entry img 0x0a37 and ends at img
+   0x53c4 with a jump to Demo_Shutdown, so the whole demo is one linear
+   timeline across three functions and nothing returns.
+
+   This note covers the machinery all ten parts share - the timebase,
+   the sync, the sine table and the terrain generator - and what is
+   established about the first two renderers. NO PART IS YET MATCHED TO
+   A VISIBLE EFFECT. Section 2 says what is on screen and section 7
+   says why that is not enough to name anything.
+
+Table of Contents
+
+   1. The shape of a part
+   2. What is on screen
+   3. The timebase
+   4. The sine table
+   5. The two-sine displacement fields
+   6. The plasma, and where the texture comes from
+      6.1. One stream, and the order it is drawn in
+   7. Getting to the screen
+   8. The two renderers that are read
+   9. Open questions
+
+1.  The shape of a part
+
+   Every part of Demo_Timeline has the same three pieces [verified]:
+
+       set a block of cs: globals        the parameters
+       set g_MusicPosTarget             how long the part lasts
+       call one renderer                which loops until then
+       call Vga_ClearScreen             between parts
+
+   The ten parts, in order, with the runner each ends on:
+
+   +------+--------------------+--------------------------------------+
+   | Sync | Runner             | Other calls in the block             |
+   +======+====================+======================================+
+   | 0x33 | 2925 Landscape     | 3b65, 3b17, 42b5                     |
+   | 0x34 | 2925 Landscape     | 42d8, 3fae, 39d8, 3e79, 3b17, 42b5   |
+   | 0x35 | 25f7               | 3fae, 39d8                           |
+   | 0x37 | 23da               | 3fae, 39d8                           |
+   | 0x37 | 2504 Warp          | 3eba, 3b17, 3620, 3fae, 33a0, 32fa   |
+   |      | +g_TickTarget 0x20 |                                      |
+   | 0x3a | 23fe, 301f         | 3fae, 39d8, 43d4, 3d93 twice, 410a   |
+   | 0x4a | -                  | 0aae, 3ed4, 3b17, 3007, 3f1e         |
+   | 0x4b | 25c7               | 43d4, 3b17                           |
+   | 0x4c | 25e2               | 3fae, 0aae twice                     |
+   | 0x52 | 2358               |                                      |
+   +------+--------------------+--------------------------------------+
+
+   THE SYNC IS THE STRUCTURE OF THIS DEMO AND THERE IS NO CENTRAL FRAME
+   LOOP [verified]. Every runner ends with the same six instructions,
+   and 2504's copy at 1000:259a is the clearest:
+
+       mov ax, g_MusicPosTarget
+       cmp g_MusicPos, ax
+       jc  <the runner's own entry>
+       mov ax, g_TickTarget
+       cmp g_TickCount, ax
+       jc  <the runner's own entry>
+       ret
+
+   So a part's length is set by the MUSIC, not by a frame count, and
+   each renderer owns its own loop. g_TickTarget is a second condition
+   and only one part uses it: part 5 sets it to 0x20 so that the warp
+   runs at least 32 ticks even if the music is already past 0x37.
+
+   Twelve functions read g_MusicPos and NONE of them writes it; the
+   writer is maybe_Music_Step at 1000:2200, reached only from the
+   interrupt handler. That is why the sync looks like it has no source
+   when read from the renderers alone.
+
+2.  What is on screen
+
+   [observed], reported from running the demo. It is here to say where
+   to look next and it is NOT evidence for any name - CLAUDE.md rule 12.
+
+   o A voxel-style landscape, brown land with blue water, with text
+     over it reading "isn't very proud to present" and "their first
+     intro called". The text has a drop shadow that is a flame effect.
+   o A countdown from 4. Each digit is drawn from dots that ripple like
+     a flag, then expand outwards to disappear into the next number.
+   o A spaceship, possibly also voxels, which flies up and around over
+     the landscape.
+
+   Ten parts and three described passages do not line up one-to-one,
+   and nothing above identifies WHICH of the ten any of it is. The
+   strings the text comes from are at img 0x0a523 onward - see
+   subsystems/unpacked_image.txt section 6.
+
+3.  The timebase
+
+   One timer, one rate, and the demo's own speed control sets it
+   [verified].
+
+   Timer_Isr at 1000:0b60 is the INT 8 handler. It is installed by
+   Demo_Entry at img 0x0128-0x0141 and restored by Demo_Shutdown, and
+   it is REACHABLE BY NO CALL. The only reference to it is the
+   INT 8 vector write, so nothing in the control-flow graph leads to
+   it.
+
+   What it drives:
+
+       img 0b90   inc g_TickFlag     what Demo_WaitTick spins on
+       img 0cb7   inc g_TickCount    the sync counter
+       via 2200   g_MusicPos         the other sync counter
+
+   Timer_SetRate at 1000:0b37 programs PIT channel 0, mode 2, with
+   1,193,180 / g_Speed. **So the tick rate in Hz is g_Speed itself.**
+
+   Input_Poll at 1000:0ace reads port 0x60 directly, because Demo_Entry
+   masked IRQ1 at the PIC so no INT 9 ever runs. It sets g_Speed from
+   the function keys as `0x19 << (scancode - 0x3c)`, not from a table:
+
+   +-----+----------+--------------------------------------------+
+   | Key | g_Speed  | Note                                       |
+   +=====+==========+============================================+
+   | F1  |      25  | remapped to F2 and sets cs:[0xa87d]        |
+   | F2  |      25  |                                            |
+   | F3  |      50  |                                            |
+   | F4  |     100  | the demo's own "Normal speed"              |
+   | F5  |     200  |                                            |
+   | F6  |     400  |                                            |
+   +-----+----------+--------------------------------------------+
+
+   ESC, scancode 0x01, jumps straight to Demo_Shutdown.
+
+   **Normal speed is exactly 100 Hz.** Every duration in the demo is in
+   those ticks, so that is the number any reconstruction has to run at.
+
+4.  The sine table
+
+   g_SinTable at 1000:7f5e, typed Xcur_SinTable [verified]. A FLAT
+   640-DWORD TABLE AT A 4-BYTE STRIDE:
+
+       v[k] = round(4095 * sin(2*pi*k/512))
+
+   checked against all 512, worst error 2.0, which is 0.048% of the
+   amplitude. So it is a 512-STEP sine, plus a 128-entry tail that
+   continues the same function - and the tail is there so THE COSINE
+   IS THE SAME TABLE READ 0x200 BYTES ON, 128 dwords, a quarter of 512,
+   without ever running off the end. There is no second table.
+
+   CORRECTION. This was typed as 256 entries of a {sin, sin_half} pair
+   on the strength of the 8-byte stride below. That reading is not
+   wrong about the height fields - every other dword IS a 256-step
+   sine, which is exactly what they index - but Voxel_Render reads the
+   table with `& 0x7fc`, a byte offset at the full 512 steps, and the
+   pair model gets its camera wrong by a factor of two.
+
+   The amplitude 4095 is 0xfff, so a product is 12 bits of fraction.
+   The height fields scale an index by 8 rather than 4 - `shl 2 / and
+   0x3fc / add bx,bx` - which is what makes the pair reading look
+   plausible: an 8-byte step over a 4-byte table is every other
+   entry.
+
+5.  The two-sine displacement fields
+
+   THESE ARE NOT THE TERRAIN. They are 128x128 displacement maps that
+   something else samples - maybe_Warp_Render reads one to offset a
+   lookup into a bitmap - and the demo never draws either directly.
+   The terrain and texture data is the plasma in section 6. Drawing a
+   field raw gives a flat grey square, because terrain A only spans
+   0x40..0xbf, and terrain B is signed so it gives near-black against
+   near-white; both are correct and neither is a picture.
+
+   Inline in Demo_Timeline at img 0x507a-0x50c0, writing g_ScratchField
+   at 8a79:0x4564 [verified]. 128 x 128 bytes, one byte per sample:
+
+       h(x,y) = ((sin[(2x + y) & 0xff] + sin[(y - 2x) & 0xff]) >> 7)
+                + 0x80      , stored as a byte
+
+   where x and y both count DOWN from 0x80 to 1 and the destination
+   index increments once per sample, so the field is filled in reverse
+   on both axes.
+
+   IT IS SEPARABLE, and that is the form worth having. By
+   sin A + sin B = 2 sin((A+B)/2) cos((A-B)/2) with A = 2x+y and
+   B = y-2x, the two arguments average to y and differ by 4x:
+
+       h(x,y) = ((2 * 4095 * sin(2*pi*y/256) * cos(4*pi*x/256)) >> 7)
+                + 0x80
+
+   checked against the real table over 256 y by 37 x: worst deviation
+   3.9 on an amplitude of 8190, which is 0.047% - exactly the table's
+   own deviation from a true sine, so the identity is exact and the
+   table is the only error. ONE period in y, TWO in x, peak +/-63 about
+   0x80.
+
+   So it is an egg-crate, not the diagonal interference the summed
+   form suggests, and that is what it looks like when rendered. The
+   reconstruction in sim/ transcribes the summed form regardless,
+   because that is what the code does.
+
+   The range follows from section 4: the two sines span +/-4095 each,
+   so the sum shifted right by 7 spans +/-63, and the +0x80 bias puts
+   every sample in 0x41..0xbf centred on 0x80. The bias is `add ax,
+   0x80` on a value stored as a byte, so it is the usual signed-to-
+   unsigned flip of the top bit, not an offset that can overflow.
+
+   Two sines summed with the arguments 2x+y and y-2x is a diagonal
+   interference pattern, which is the standard cheap heightfield. It is
+   built ONCE, between parts 4 and 5, and then animated only by moving
+   the sampling offsets - see section 6.
+
+6.  The plasma, and where the texture comes from
+
+   Plasma_Generate at 1000:3fae, with Plasma_Displace at 1000:40e3.
+   DIAMOND-SQUARE MIDPOINT DISPLACEMENT over a 256x256 torus in DS
+   [verified]. This is the demo's texture and terrain source, and the
+   producer behind segment 0x2a79.
+
+       seed DS:0 from Rand_Next
+       step = 0x80, step_lin = 0x8000, shift = 1
+       repeat until step is 0:
+           for every cell:
+               centre         = mean of the four corners
+               top midpoint   = mean of the two top corners
+               left midpoint  = mean of the two left corners
+               each through Plasma_Displace
+           step and step_lin halve; shift += g_PlasmaRough
+
+   step_lin is always step * 256, the row stride, kept as a second
+   variable rather than recomputed.
+
+   THE TORUS IS FREE IN ONE DIRECTION AND NOT THE OTHER. Offsets are
+   16-bit into one 64 KB segment, so stepping DOWN past the last row
+   wraps by itself. Stepping RIGHT does not: si + 2*step lands on
+   column 0 of the NEXT row. img 0x401a reads [si + 0xff00] instead,
+   which is si - 0x100 and so column 0 of the SAME row, guarded by the
+   test at img 0x4013 for the last column block only.
+
+   Plasma_Displace:
+
+       d = sar((Rand_Next() & g_PlasmaMask) - g_PlasmaBias,
+               g_PlasmaShift)
+       v = average + d, clamped below to 0 and at or above 0xff to 0xff
+
+   THE CLAMP IS LOAD-BEARING. With mask 0x3fff, bias 0x2000 and shift
+   1, the first octave's offset is +/-8192 against a 0..255 range, so
+   the coarse octaves SATURATE: they lay down flat regions at 0 and
+   0xff which the finer octaves then texture. Widening the range to
+   avoid the clamp does not tidy the output, it makes a different
+   effect.
+
+   g_PlasmaShift rises by g_PlasmaRough each octave, so rough 1 halves
+   the amplitude per octave (1/f) and rough 2 quarters it.
+
+   +---------------+---------------+----------------+--------------------+
+   | g_PlasmaMask  | g_PlasmaBias  | g_PlasmaRough  | set at             |
+   +===============+===============+================+====================+
+   | 0x3ff         | 0x200         | 1              | img 0x4ef0, 0x50f1 |
+   +---------------+---------------+----------------+--------------------+
+   | 0x3fff        | 0x2000        | 2              | img 0x4f7d, 0x515d |
+   +---------------+---------------+----------------+--------------------+
+   | 0x3fff        | 0x2000        | 1              | img 0x534b         |
+   +---------------+---------------+----------------+--------------------+
+
+   Each call is followed by a byte transform over the whole 64 KB that
+   maps the plasma into a palette band [verified]:
+
+       img 4e70   (v << 2) + 0x80
+       img 5108   (v >> 2) + 0x20        a 64-entry band at 0x20
+       img 5376   (v >> 3) + 0xe0        a 32-entry band at 0xe0
+       img 4f96   clamp below 0x10
+       img 5176   clamp below 0x10
+
+   So the palette is divided into bands and each effect indexes its
+   own, which is why the real palette has to be found before any of
+   this can be shown in colour.
+
+6.1.  One stream, and the order it is drawn in
+
+   THE WHOLE DEMO SHARES ONE RANDOM STREAM AND THE GENERATORS DO NOT
+   RE-SEED IT [verified]. Rand_Next's state is g_RandA and g_RandB at
+   img 0x9879 and img 0x987b, static in the image at 0x9e8e and
+   0x636d. Only two instructions ever write them - img 0x4f64 and img
+   0x514a, both in this function, both writing those same two words -
+   so the whole Demo_Entry chain runs from the static state with no
+   reset in it.
+
+   SO EVERY GENERATED FIELD DEPENDS ON HOW MANY DRAWS CAME BEFORE IT.
+   A Plasma_Generate is exactly 0x10000 draws - one for DS:0 and three
+   for each of the 21,845 cells - and Points_Randomize is 3000. Across
+   Demo_Entry the consumers run in this order [verified]:
+
+       img 0x00a4   Plasma_Generate    mask 0x7fff bias 0x4000 rough 3
+       img 0x022d   Plasma_Generate    mask 0x0fff bias 0x0800 rough 2
+       img 0x02d5   Points_Randomize   3000 draws
+       img 0x041d   Plasma_Generate    mask 0x07ff bias 0x0400 rough 1
+       img 0x1f79   Glow_Burst         64 draws PER HIT, unparked
+       img 0x13db   mode 0xc's trickle 2 draws a tick, 512 in all
+       img 0x159a   Glow_Burst         64 draws, the warp-out
+       img 0x07ed   Plasma_Generate    mask 0x0fff bias 0x0800 rough 1
+
+   THE GLOW PARTICLES ARE PART OF THE STREAM. Glow_Burst's call in the
+   modes 9/0xa tail is PARKED - img 0x1d92 saves the pair and img
+   0x1da7 restores it - so that one nets zero. The two that are not
+   parked, the mode 0xb hit burst and mode 0xd's warp-out, do move it,
+   as does mode 0xc's per-tick spawn. Measured, the advance between
+   img 0x041d and img 0x07ed is 1536 draws: 512 + 64 + fifteen hits at
+   64 [observed]. So THE NUMBER OF HITS IN THE FORMATION FIGHT CHOOSES
+   THE LAST PLASMA'S CLOUD.
+
+   Seeding per call is the obvious reading and it is wrong. It makes
+   the first field right, because it is first, and every later one a
+   different cloud of the same character - which still looks like a
+   plasma and is not the demo's. img 0x041d's field matches the running
+   demo byte for byte only once the three calls before it have drawn
+   their share [observed, against the live field at the warp part].
+
+   Points_ClearTail at img 0x42c6 runs between the last two and draws
+   nothing, so it does not move the stream.
+
+   There is also no clear before a generate, and none is needed: the
+   walk never reads a cell it has not already written, so the previous
+   field's bytes are unreachable.
+
+7.  Getting to the screen
+
+   Vga_Present at 1000:32fa, and it is the only path [verified]:
+
+       DS = g_WorkSeg      0x5a79, set once at Demo_Entry img 0x014f
+       ES = 0xa000
+       rep movsd 0x3e80    64000 bytes, the whole of mode 13h
+
+   Thirteen callers - every renderer, plus Demo_Timeline. Nothing else
+   writes 0xA000 except Vga_ClearScreen, so EVERY EFFECT IS
+   DOUBLE-BUFFERED through 0x5a79 whether it looks like it or not, and
+   a reconstruction that draws straight to the screen has already
+   diverged.
+
+   There is no retrace wait here or anywhere else. Tearing is accepted;
+   timing is Timer_Isr at g_Speed Hz.
+
+8.  The two renderers that are read
+
+8.1.  maybe_Mapped_Render, 1000:2925
+
+   The runner for parts 1 and 2, so the first thing the demo draws.
+
+       img 2925  clear the 320x200 offscreen buffer at segment 0x5a79
+       img 2935  call 3207
+       img 2947  BX = 0x2de0 - (g_maybe_CamDist >> 10)    a screen row
+       img 295c  128 rows x 128 columns
+       img 2961  EAX = g_maybe_CamDist, += 0x400 per column, and the
+                 column is SKIPPED once EAX >= 0x38000 - a march with
+                 a 224-step far cutoff
+       img 296f  SI = word from segment 0x6a79, skipped on the
+                 sentinel 0xf380 - a precomputed per-sample offset
+       img 2978  DH = byte from segment 0x2a79 at BP+SI, then
+                 >>2, -0x20, &0x3f - a 64-entry colour fetch
+       img 2986  dec BX          writes RIGHT TO LEFT
+       img 2993  BX += 0x140     next row of a 320-wide buffer
+       img 299e  call Vga_Present
+
+   THIS IS NOT THE LANDSCAPE, despite the distance march and the far
+   cutoff above. The landscape is Voxel_Render at 1000:3620 - see
+   effects/voxel.txt.
+
+   What rules this one out is the precomputed offset table: a fixed
+   table encodes ONE viewing direction, so this cannot rotate, where
+   Voxel_Render builds its rays from the sine table per slice and
+   does. A distance accumulator and a far cutoff are not enough to
+   identify a landscape renderer; the y-buffer and the ray
+   construction are.
+
+   What it actually draws is unestablished. A precomputed mapping with
+   depth culling and a point cloud over it, on a 1996 demo, is usually
+   a tunnel - and that is a guess.
+
+   It does not read g_ScratchField. Its geometry comes from the offset
+   table in segment 0x6a79 and its colours from 0x2a79, and neither
+   producer is identified.
+
+8.2.  maybe_Warp_Render, 1000:2504
+
+   The runner for part 5. A displacement-mapped 2x2-block blit, and
+   the one place g_ScratchField is read [verified]:
+
+       DS = 0x2a79   source image, 0x100 stride, bounded 160 x 128
+       ES = 0xa000   the mode 13h framebuffer
+       FS = 0x5a79   background, used where the source lookup misses
+       GS = 0x8a79   g_ScratchField
+
+       93 columns x 76 rows of 2x2 blocks, destination from 0x1e46,
+       which is x=70 y=24 on a 320-wide screen
+
+       BL = g_ScratchField[(g_WarpOfsX + SI) & 0x3fff] >> 2 - 0x70
+       AX = (g_ScratchField[(g_WarpOfsY + SI) & 0x3fff] & 0xfc) << 6
+       AX -= 0x4200
+       BX  = BL + AX + SI
+
+   BX is then a source coordinate PAIR - BL the x, BH the y - which is
+   what the two bounds tests at img 0x255a and 0x255f check against
+   0xa0 and 0x80. Out of bounds takes the background instead. Two
+   pixels come from [BX] and two more from [BX+0x100], the row below.
+
+   The two offsets are set to 0xdc00 just before the part starts, and
+   Timer_IsrFrameUpdate at img 0x0e73 animates them, -1 on
+   g_WarpOfsX and +0x101 on g_WarpOfsY per tick. So the field is built
+   once and the animation is entirely in moving the sampling points -
+   at the tick rate, not per rendered frame. Countdown_Render samples
+   the same two offsets, so the warp pushes the countdown particles
+   too.
+
+9.  Open questions
+
+   o **No part is matched to a visible effect.** Section 2 describes
+     three passages; section 1 lists ten parts. The cheapest way to
+     close this is the order of Demo_Timeline's parameter blocks against
+     the order things appear, not a guess from shape.
+
+   o PARTLY RESOLVED: 0x2a79 is filled by Plasma_Generate (section 6),
+     and 0x6a79's table by maybe_Dist_BuildTable at 1000:42d8, which
+     sums two squared distances out of g_SqrTable at cs:0xaf7c into a
+     radial field. Demo_Timeline also rebuilds 0x6a79 at img 0x5216
+     from g_ScratchField, clamped to 0..0xbf, so the table has at least
+     two producers and which one is live depends on the part.
+
+   o **The palette.** Nothing else blocks showing these effects in
+     colour, and section 6 shows the plasma is mapped into bands -
+     0x20..0x5f, 0xe0..0xff - so the palette's layout matters as much
+     as its contents. Written through 0x3c8 at img 0x31d2, 0x3b3d and
+     0x3e32; the source data is untraced.
+
+   o **g_maybe_CamDist at 1000:9464 is the camera**, probably distance
+     or altitude: it offsets the starting screen row and seeds the
+     march. Demo_Timeline sets it to 0xfa000 for part 1 and 0 for part
+     2, which is a large move and suggests a fly-in.
+
+   o PARTLY RESOLVED: the countdown is Countdown_Render at 1000:3873,
+     called from Demo_Entry and so BEFORE this function's parts - see
+     effects/countdown.txt, and the flame-shadowed text is
+     FireText_Render at 1000:2370 - see effects/firetext.txt. Both are
+     called from Demo_Entry, so both run BEFORE this function's parts.
+     The runners 25f7, 23da, 23fe, 25c7, 25e2 and 2358 are all still
+     unread.
+
+   o **cs:[0xa87d]**, set when F1 is pressed and F1 alone. F1 and F2
+     give the same speed, so the flag is the only difference between
+     them and nothing is known about what reads it.

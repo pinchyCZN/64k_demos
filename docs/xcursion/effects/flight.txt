@@ -1,0 +1,253 @@
+PCDEMOS 64k                                            Analysis Note
+
+
+              EXCURSION: THE AIRCRAFT, AND ITS RECORDED TRACK
+
+
+Abstract
+
+   The mode 0x16 animation handler at img 0x17e5 - 400 bytes, the
+   largest in the table - is an aircraft flight model, and IT DOES NOT
+   COMPUTE A PATH. It replays a recorded one: g_FlightTrack at
+   img 0xcc1a, one byte of control flags per ten ticks.
+
+   Six bits - pitch up, pitch down, roll left, roll right, throttle
+   down, throttle up. No yaw bit, because the model derives yaw from
+   roll the way an aircraft does.
+
+   Its part is sync 0x37, whose runner is Landscape_Run - Voxel_Render
+   with a mesh over it.
+
+Table of Contents
+
+   1. The track
+   2. The controls
+   3. The banked turn
+   4. Integration, and the terrain
+   5. The chase camera
+   6. Why this is worth the bytes
+   7. The recorder is not in the image
+   8. Open questions
+
+1.  The track
+
+   g_FlightTrack at img 0xcc1a, walked by g_FlightTrackPtr
+   [verified]:
+
+       img 17e5   di = g_FlightTrackPtr
+       img 17ea   g_TickDivider++
+       img 17ef   every TEN ticks, g_FlightTrackPtr++
+       img 1802   al = cs:[di]
+
+   So one byte buys a tenth of a second at g_Speed 100, and the
+   pointer only ever advances - there is no loop and no reset.
+
+   THE MODE IS ARMED AFTER THE PART'S SETUP, img 0x4fb5 against the
+   Plasma_Generate at img 0x4f91, so the craft does not integrate
+   while the field is built - but the module's row counter does
+   advance through it. Fifteen ticks of flight sit two rows into the
+   pattern rather than one [observed], and how far apart those run is
+   machine speed.
+
+   422 bytes from 0xcc1a carry only the six valid bits, which is
+   42.2 seconds; 92 of them are non-zero. img 0xcdc0 is the first byte
+   that cannot be control flags [verified]. How much of the 422 the
+   part actually consumes depends on how long sync 0x37 runs, which is
+   set by the music and has not been measured.
+
+   What the pilot did, counted over the first 160 bytes [verified]:
+
+   +------------------------+-----------+
+   | Input                  | Duration  |
+   +========================+===========+
+   | nothing                |   7.5 s   |
+   | pitch up + roll left   |   1.6 s   |
+   | pitch down + roll right|   1.5 s   |
+   | roll right             |   1.2 s   |
+   | pitch down             |   1.0 s   |
+   | roll left              |   0.9 s   |
+   | pitch down + roll left |   0.8 s   |
+   | pitch up               |   0.7 s   |
+   | pitch up + roll right  |   0.4 s   |
+   | four throttle taps     |   0.4 s   |
+   +------------------------+-----------+
+
+   Almost all stick and almost no throttle, and nearly half the time
+   hands off. That is a recording of someone flying, not a hand-authored
+   table.
+
+2.  The controls
+
+   img 0x1802 to 0x1840, one bit test each [verified]:
+
+       bit 0x01   g_ObjPitch += 4
+       bit 0x02   g_ObjPitch -= 4
+       bit 0x04   g_ObjRoll  -= 4
+       bit 0x08   g_ObjRoll  += 4
+       bit 0x10   g_FlightThrottle--
+       bit 0x20   g_FlightThrottle++
+
+   Nothing is clamped and nothing decays. Hold a bit and the value
+   ramps; release it and the value stays. So the stick is a RATE
+   control on attitude, not a position - which is what makes a
+   ten-per-second sample rate enough.
+
+3.  The banked turn
+
+   One instruction, and it is why there is no yaw bit [verified]:
+
+       img 1841   g_ObjYaw += g_ObjRoll >> 6
+
+   ROLL INDUCES YAW. Bank the craft and it turns, at a sixty-fourth of
+   the bank angle per tick, exactly as a real aircraft does and for the
+   same reason a flight sim does it. The recording therefore only ever
+   needed to say "stick left" and the turn follows.
+
+4.  Integration, and the terrain
+
+   img 0x1865 to 0x18f0 [verified]:
+
+       latch pitch, yaw and roll
+       ecx = g_FlightThrottle, CLAMPED TO AT MOST 0 at img 0x1871
+       Vec_Rotate3 -> the velocity along the craft's heading
+       ebx >>= 7 ; eax >>= 1 ; ecx >>= 1
+       g_FlyX += eax ; g_FlyY -= ebx ; g_FlyZ += ecx
+
+   The y term is shifted SIX PLACES FURTHER than x and z, so vertical
+   motion from the heading is a sixty-fourth of the horizontal. The
+   craft flies much flatter than it points.
+
+       eax = (g_FlightThrottle >> 1) + 0x10
+       if eax > 0: g_FlyY -= eax
+
+   Gravity, and its strength depends on the throttle - more throttle,
+   which is more negative, means less sink.
+
+   g_FlightThrottle is -64 by static and the clamp at img 0x1871
+   allows only values at or below 0, so MORE NEGATIVE IS FASTER.
+   Nothing in the part resets it, and it is still -64 fifteen ticks
+   into sync 0x35 [observed] - the track spends its throttle bits
+   late or not at all.
+
+   THE TERRAIN COLLISION LEVELS THE CRAFT OUT, img 0x18bd:
+
+       ground = Terrain_HeightAt(g_FlyX, g_FlyZ) + 0x10
+       if g_FlyY < ground:
+           g_FlyY = ground
+           g_ObjPitch += (0x30 - g_ObjPitch) >> 5
+           g_ObjRoll  -= g_ObjRoll >> 5
+
+   So touching the ground does three things at once: lifts the craft to
+   the surface, eases its pitch toward a slight nose-up 0x30, and
+   decays its roll toward level - both by the demo's usual
+   shift-and-add. A crash becomes a recovery, which means the recorded
+   track cannot fly the craft into the ground and lose it.
+
+5.  The chase camera
+
+       img 18fa   g_CamAngleNext -= 2
+       img 1900   g_CamWorldX = g_FlyX - 8 * sin(g_CamAngleNext)
+                  g_CamWorldZ = g_FlyZ - 8 * cos(g_CamAngleNext)
+
+   A camera on a radius-8 arm that sweeps round the craft. Then a
+   SECOND terrain probe, at the camera's own position, clamps
+   cs:0x9871 to at least that ground plus 0xc8 - so the view is kept
+   above the landscape independently of the craft.
+
+   Two Terrain_HeightAt calls a tick, where the car's handler makes
+   four.
+
+   cs:0x9871 IS THE VOXEL CAMERA'S SCALE [verified]. img 0x18f1 puts
+   the craft's altitude in it as a WORD, the camera probe raises it,
+   and img 0x35eb - the latch Voxel_Render opens with - copies it
+   into cs:0x9975, which effects/voxel.txt section 8.1 lists as the
+   scale term. The same latch takes cs:0x9360 and cs:0x9364 into the
+   camera's world position and cs:0x987d into its angle, so the
+   handler writes sources and the renderer reads copies.
+
+   THE PART FADES IN THROUGH THIS HANDLER, img 0x195e: while
+   g_FadeLevel is non-zero it climbs by 0x100 a tick and calls
+   Pal_Fade. The rotozoom part before it drives the level negative
+   without applying it - effects/roto.txt section 5 - so the screen
+   is still bright at the cut and darkens on this handler's first
+   tick before climbing back.
+
+6.  Why this is worth the bytes
+
+   The track is 422 bytes for 42 seconds of flight. A keyframed spline
+   over the same path, at even one key a second with three positions
+   and three angles as words, would be 42 * 12 = 504 bytes and would
+   still need interpolation code.
+
+   Recording the INPUT instead of the OUTPUT means the flight model
+   code - which the demo needs anyway to make the motion look right -
+   doubles as the decompressor. That is the whole trick, and it is why
+   the handler is the largest in the table while its data is the
+   smallest it could be.
+
+   The cost is that the path is not editable and not reproducible
+   except by running the same model, which is exactly the property that
+   makes it cheap.
+
+7.  The recorder is not in the image
+
+   Whatever captured the track was a separate tool. Three pieces of
+   evidence, all of them negative and all of them checked [verified]:
+
+   +---------------------------+------------------------------------+
+   | Looked for                | Found                              |
+   +===========================+====================================+
+   | writes to g_FlightTrack   | NONE. img 0xcc1a has exactly one   |
+   |                           | reference in the image and it is   |
+   |                           | the read at img 0x1802             |
+   +---------------------------+------------------------------------+
+   | mouse support             | NONE. No INT 33h anywhere in the   |
+   |                           | image                              |
+   +---------------------------+------------------------------------+
+   | keyboard beyond the exit  | ESC and F1 to F6, and they are a   |
+   |                           | TIMER SELECTOR                     |
+   +---------------------------+------------------------------------+
+
+   The F-keys are worth spelling out, because six of them against six
+   control bits is a coincidence that invites the wrong conclusion.
+   Input_Poll at img 0x0ace reads port 0x60 and tests 0x3b to 0x40;
+   every one of them lands at img 0x0aef, which computes
+
+       cs:0x9867 = 0x19 << (scancode - 0x3c)
+
+   and reprograms the PIT through img 0x0b37, so F2 to F6 give 25,
+   50, 100, 200 and 400 Hz. F1 substitutes F2's scancode and raises
+   g_RenderDisabled instead, which is a detail switch rather than a
+   speed - see the plate on Input_Poll. Nothing in that path touches
+   the craft.
+
+   The only other port 0x60 read is img 0x55e9, a wait-for-keypress
+   that spins on the break bit.
+
+   So the demo ships the output of a recorder and not the recorder,
+   which is what section 6 would predict: the replay needs the flight
+   model, and the flight model is in here, but capture needs neither.
+
+8.  Open questions
+
+   o Where the track really ends. 422 bytes is where the first byte
+     appears that cannot be control flags; whether the last stretch is
+     used, padding, or a different asset is not established.
+
+   o THE CHASE CAMERA RUNS ~20 TICKS AHEAD OF THE DEMO'S, because
+     the part's setup costs the demo that much and costs src/ none.
+     g_CamAngleNext falls 2 a tick, so at the same music position the
+     demo is about 32 units - under three degrees - behind, closing
+     to under one by the part's end [observed]. The craft itself is
+     exact: at order 0x36 row 62 both have it at x -729112, z 242798.
+
+     The offset is machine speed, like every other entry cost here,
+     and injecting it would be tuning rather than transcription. What
+     it does mean is that the flag part after this one inherits a
+     camera angle a degree off, since img 0x50c2 takes whatever this
+     part left and adds 0x200.
+
+   o sim/ still has no part for this. sim/xcursion/parts.py has
+     flight_tick and reads the track out of the image, but nothing
+     drives the voxel camera and the mesh from g_FlyX/Y/Z together
+     there. src/xcursion/xcursion_demo.c has scene_landing.

@@ -1,0 +1,263 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                   LITHIUM: THE TRAIL BLOBS
+
+
+Abstract
+
+   The lasers and the explosions of scene 2.12. 64 particles with a
+   life counter, drawn as additive blobs out of the SAME cone sprite
+   the lens flare uses.
+
+   THE LIFE COUNTER DOES THREE JOBS: it says whether the particle is
+   alive, it scales the blob's brightness, and ITS BOTTOM BIT CHOOSES
+   WHICH BLITTER DRAWS IT - one that recolours what it hits and one
+   that only brightens it.
+
+   All [verified] from Trail_Step and Trail_Draw unless marked.
+   effects/sky.txt section 6 is the blitter family.
+
+Table of Contents
+
+   1. The ring
+      1.1. g_TrailActive decides whether any of it runs
+   2. Trail_Step
+   3. Trail_Draw
+      3.1. The projection is done by hand
+   4. Two blitters, one bit apart
+   5. The weapon that fills it
+      5.1. Trail_Spawn
+      5.2. The parity is forced, not chanced
+      5.3. A second generator
+   6. Open questions
+
+1.  The ring
+
+   64 records of 0x16 bytes at 0x8ad2:0x7a80, ending at 0x8000. Both
+   routines walk it with the same bound, and Tex_SnapshotFrame clears
+   exactly 0x580 bytes there - 1408, which is 64 x 22 [verified].
+
+       +0x00  dword  position x       +0x0c  word  velocity x
+       +0x04  dword  position y       +0x0e  word  velocity y
+       +0x08  dword  position z       +0x10  word  velocity z
+       +0x12  dword  THE LIFE
+
+   THE SAME RING IS READ A SECOND WAY. Tick_Greetings writes words at
+   +0x00, +0x02, +0x04, +0x06 and +0x08 and a dword at +0x0c, which
+   does not match the layout above - effects/text.txt section 4. The
+   records are 22 bytes either way; each effect imposes its own
+   reading. Neither is the record's definition.
+
+   1.1.  g_TrailActive decides whether any of it runs
+
+      Both routines return at once while the byte at 1000:8fbc is
+      zero, and the ONLY thing that raises it is Trail_Spawn at
+      1000:5ebf. Trail_Spawn is reached from one place - the weapon
+      tail of Flight_Step - and that needs g_SlotFiring, which only
+      track command 0x19 sets. So the trails exist exactly where a
+      track shoots, and nowhere else.
+
+      TRAIL_DRAW RE-ARMS IT EVERY FRAME, which is how the ring
+      switches itself off: 1000:26bd clears the byte and 1000:26d1
+      puts it back if a record is still alive, so once the last life
+      runs out both routines go quiet until the next shot.
+
+      SO THE SURFACE FLYOVER HAS NO TRAILS, even though it calls
+      Trail_Draw at 1000:1b5e every frame. Measured from the scene's
+      entry to its end: the flag is never written and stays zero,
+      and neither of the two slots the scene flies issues command
+      0x19 - the camera uses 0, 2, 3, 0xe, 0xf, 0x10, 0x17 and 0x18
+      and the lead craft 0, 6 and 8 [verified].
+
+      IN THE BATTLE IT ARMS MID-SCENE, at 1000:5ebf, and from that
+      frame on the clear-and-re-arm pair runs every frame
+      [verified]. That scene and maybe_Scene_TowerFall are where
+      this effect is worth porting.
+
+2.  Trail_Step
+
+   1000:6164, once a tick, called by all three track handlers.
+
+       return if g_TrailActive == 0
+       per record:
+           position += velocity, on all three axes
+           if [+0x12] & 1:
+               velocity_y--                        GRAVITY
+               if [+0x12] < 0xaa00:
+                   [+0x12] = 0x28000               respawn
+                   velocity = (0, 0x80, 0)
+           [+0x12] -= 0x7d0, floored at 0
+           di += 0x16
+
+   0x28000 is the same constant Scene_ProjectVerts uses as its fog
+   threshold.
+
+3.  Trail_Draw
+
+   1000:26a4, once a frame. Three callers, one per scene that needs
+   it: maybe_Scene_SurfaceFlyover at 1000:1b5e, maybe_Scene_Battle at
+   1000:21cd and maybe_Scene_TowerFall at 1000:2478.
+
+       return if g_TrailActive == 0
+       DS = 0x4ad2    the back buffer
+       ES = 0x7ad2    THE FLARE SPRITE, reused
+       FS = 0x8ad2    the ring
+       g_TrailActive = 0
+       per record:
+           skip if life <= 0
+           g_TrailActive = 1
+           g_BlobLife = life
+           position less the camera, x and y negated, SAR 4
+           rotate by the camera angles, perspective divide
+           edx = g_BlobLife / z, capped at 0xfe, THEN INVERTED
+           g_FlareColour = ~dl
+           g_SunSavedX, g_SunSavedY = 0xa0, 0x64
+           if g_BlobLife & 1: Blob_DrawBurn else Blob_DrawKeepBand
+
+   g_TrailActive IS A LATCH, not a setting. Trail_Draw clears it and
+   sets it again only if it drew something, so a frame with nothing
+   alive costs one compare here and makes the next Trail_Step return
+   at once. Neither routine has to count the living.
+
+   THE BRIGHTNESS IS INVERTED BEFORE USE. g_BlobLife / z is capped at
+   0xfe and then complemented, and the blitters SUBTRACT
+   g_FlareColour from the sprite - so a larger quotient, meaning a
+   closer or younger particle, leaves more of the sprite above the
+   cutoff and the blob comes out bigger and brighter.
+
+   IT BORROWS THE FLARE'S PLUMBING. The blitters add g_SunSavedX and
+   g_SunSavedY to the offset they are handed, so setting those to
+   0xa0, 0x64 - the centre of the screen - makes them place the blob
+   at centre plus projection. Nothing about the flare is involved
+   beyond the shared globals and the shared sprite.
+
+   3.1.  The projection is done by hand
+
+      img 0x26ef subtracts slot 0's position, NEGATES x and y,
+      shifts all three down 4, and rotates Y then X then Z with a
+      SAR 0xc between - the camera transform's order at a different
+      scale, because a particle is a point and carries no vertex
+      record.
+
+      THE NEAR TEST IS A REJECT, img 0x275e, where every other
+      projection in the demo clamps. A blob behind the camera is
+      dropped rather than smeared across the screen.
+
+      The divide is the usual 64-bit dividend, img 0x276a -
+      subsystems/raster.txt section 2.
+
+4.  Two blitters, one bit apart
+
+   Blob_DrawKeepBand at 1000:48a3 and Blob_DrawBurn at 1000:4943 are
+   the same routine except for one instruction:
+
+       Blob_DrawKeepBand    dl &= 0xc0;  dh |= dl      keep the band
+       Blob_DrawBurn        dh |= 0xc0                 FORCE band 3
+
+   Both take al = sprite - g_FlareColour, skip the pixel if that
+   borrows, shift it right by 3 for a 0 to 0x1f intensity, add it to
+   the destination's low six bits and saturate at 0x3f.
+
+   SO ONE BRIGHTENS AND THE OTHER RECOLOURS. A pixel Blob_DrawBurn
+   touches ends up in the top 64-entry band whatever it was before,
+   which is how a bolt reads as its own colour rather than as a
+   brightening of the terrain under it.
+
+   BIT 0 OF THE LIFE PICKS BETWEEN THEM, AND IT IS A TYPE FLAG RATHER
+   THAN A PHASE. Trail_Step decrements the life by 0x7d0 and respawns
+   it at 0x28000, both even, so the bit never changes for the life of
+   a particle.
+
+   IT IS THE SAME BIT THAT GATES GRAVITY in Trail_Step. So one bit of
+   the life counter defines two kinds of particle:
+
+   +-------+-----------+---------------------+
+   | Bit 0 | Falls     | Drawn with          |
+   +=======+===========+=====================+
+   | 1     | yes       | Blob_DrawBurn       |
+   | 0     | no        | Blob_DrawKeepBand   |
+   +-------+-----------+---------------------+
+
+   A heavy bolt that falls and burns its own colour, and a weightless
+   spark that drifts and only brightens - told apart by the low bit of
+   a counter that is otherwise a lifetime.
+
+   SINCE THE RESPAWN VALUE IS EVEN, a recycled record always comes
+   back as the weightless kind.
+
+5.  The weapon that fills it
+
+   The tail of Flight_Step, at 1000:5dc0 - the same routine that
+   eases the attitude and applies the throttle, effects/flight.txt.
+
+       if g_SlotFiring == 0: return          set by command 0x19
+       cs:[si + 0x8ead]++
+       return unless (that & 7) == 0          ONE TICK IN EIGHT
+       Trail_Spawn
+       [di+0x12] = 0x32000                    an EVEN life
+       velocity = (0, 0x80, 0)
+       eax = Terrain_HeightAtSlot + 0x280
+       if the slot's y is still above eax: return
+       cx = 0x32;  Trail_SpawnBurst           FIFTY particles
+       zero the slot's position and velocity
+       stop firing
+
+   A BOLT EVERY EIGHTH TICK, THEN FIFTY PARTICLES WHERE IT LANDS.
+   The bolt's life is even, so it is the weightless kind - a tracer
+   that brightens what it crosses and does not fall. The fifty are
+   odd-lifed, so they fall and burn their own colour.
+
+   THE IMPACT TEST IS AGAINST THE TERRAIN. Terrain_HeightAtSlot at
+   1000:4107 reads the height field under the slot, and the bolt is
+   spent once it comes within 0x280 of it - so the explosion happens
+   at the ground rather than at a fixed depth.
+
+   5.1.  Trail_Spawn
+
+      1000:5eba. It fills in only the POSITION, from the slot in SI,
+      and leaves DI on the record - all three callers write the life
+      and the velocity on the next instruction.
+
+      A WRAPPING CURSOR IS THE WHOLE ALLOCATOR. g_TrailWriteCursor
+      advances 0x16 and resets at 0x8000; there is no free list and
+      no search for a dead record, so the 65th spawn overwrites the
+      first whether it is alive or not.
+
+   5.2.  The parity is forced, not chanced
+
+      Trail_SpawnBurst at 1000:5e4d, CX times:
+
+          Trail_Spawn
+          ax = Rnd_NextB & 0xfffe
+          [di+0x12] = ax + 0x38401
+          vel x,z  = Rnd_NextB SAR 9       signed, so either way
+          vel y    = Rnd_NextB SHR 8       UNSIGNED, so always up
+
+      MASKING THE RANDOM EVEN AND ADDING AN ODD CONSTANT MAKES THE
+      LIFE ODD EVERY TIME. Section 4 is what that bit means; this is
+      the author making sure of it rather than leaving it to the
+      generator.
+
+      Trail_SpawnBurstBig at 1000:5e82 is the same with + 0x80001,
+      velocities shifted by 7 instead of 9 and +0x80 on the vertical
+      - a larger, longer-lived, rising burst.
+
+   5.3.  A second generator
+
+      Both bursts use Rnd_NextB at 1000:3e16, which is byte-for-byte
+      the same algorithm as Rnd_Next on its own state.
+
+      THE SEPARATION IS NECESSARY. Sky_SunAndStars reseeds the main
+      generator with fixed constants every single frame to regenerate
+      the starfield - effects/sky.txt section 4 - and Flicker_Step
+      perturbs it from its own contents. Either would destroy an
+      explosion's randomness if the weapon shared that state.
+
+      So what must look identical every frame uses Rnd_Next, and what
+      must never repeat uses Rnd_NextB.
+
+6.  Open questions
+
+   o Whether the second reading of the ring in Tick_Greetings
+     coexists with this one or replaces it for that scene.

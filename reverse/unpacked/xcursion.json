@@ -1,0 +1,14 @@
+{
+  "dump_bytes": 108432,
+  "exe_bytes": 108464,
+  "insns": 4000,
+  "load_seg": 4096,
+  "orig_cs": 4096,
+  "orig_ds": 4080,
+  "orig_ip": 0,
+  "orig_sp": 128,
+  "orig_ss": 7378,
+  "rel_cs": 0,
+  "rel_ss": 3282,
+  "unpacker_cs": 33403
+}

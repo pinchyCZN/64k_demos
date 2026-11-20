@@ -1,0 +1,394 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                        LITHIUM: THE TEXT
+
+
+Abstract
+
+   Four of the demo's scenes are text, and they all go through one
+   routine. A TEXT SCENE NEVER CALLS Scene_ProjectVerts, so none of
+   them is among the ten callers of the 3D pipeline.
+
+   The glyph index is simply the character minus 0x41, and THAT IS
+   THE WHOLE OF THE SUBSTITUTION CIPHER in ../README.txt section 7.
+   The font sheet is alphabetical except that it has no Q and W sits
+   in Q's vacant slot, so four letters are stored one place early.
+   Section 6 gives the table.
+
+   The credit roll of the surface flyover is section 7, and it is the
+   one text the demo cross-fades rather than cuts.
+
+   All [verified] from the routines unless marked.
+
+Table of Contents
+
+   1. The three routines
+   2. Text_DrawString
+   3. Text_DrawGlyph, and the font's shape
+   4. Tick_Greetings, the spawner
+   5. The font sheet
+      5.1. Two tenants of one buffer
+      5.2. The outline pass
+   6. The cipher
+   7. The credit roll
+      7.1. The table
+      7.2. What drives it
+   8. Open questions
+
+1.  The three routines
+
+       Text_DrawString      1000:2dd0  the string at g_CreditPtr
+       Text_DrawGlyph       1000:2e1a  its blitter - plain, doubled
+       Text_DrawStringAt    1000:2d46  a string in BX, segment in AX,
+                                       the fade level in DL - 0 is
+                                       full strength, 0xf nothing
+       Text_DrawGlyphBlend  1000:2d81  its blitter - transparent; it
+                                       preserves the palette band and
+                                       SUBTRACTS for the outline, 5.3
+       Tick_Greetings       1000:6972  spawns the greetings
+       Image_UnpackRle      1000:2d10  a 320x200 RLE picture, section 5
+
+   THE TWO PATHS SERVE DIFFERENT SCENES. Text_DrawString is called
+   only from Tick_Greetings, so it is 2.13. Text_DrawStringAt has five
+   call sites and FOUR OF THEM ARE INSIDE maybe_Scene_SurfaceFlyover -
+   1000:1b75, 1b8a, 1ba6 and 1bbb - which is the credit roll of
+   scenes.txt 2.6, so that runner covers 2.5 and 2.6 together. The
+   fifth is 1000:0698 in maybe_Scene_BumpShatter with BX = 0x92eb, a
+   string just past the end of g_CreditTable.
+
+   The scene at 1000:13db sets g_CreditPtr to 0x914a - "QE
+   APPRECIATE", the head of the greetings list - and installs
+   Tick_Greetings as g_TickHandler. It also resets g_TrailWritePtr and
+   g_TextSpawnTick, and sets g_PalRampShift to 1.
+
+2.  Text_DrawString
+
+       ES = 0x1e5f        the font lives in the asset segment
+       BP = 0xad1f        the font base
+       DS = 0x5ad2        THE DESTINATION
+       loop:
+           DI = g_TextPenX
+           SI = CS:[g_CreditPtr]
+           DL = 0x7f
+           g_CreditPtr++
+           if SI < 0x20: return
+           if SI == 0x20: DL = 0, SI = 0x41
+           SI -= 0x41
+           Text_DrawGlyph
+           g_TextPenX += 0xa
+
+   THREE THINGS WORTH KEEPING.
+
+   o THE GLYPH INDEX IS char - 0x41. 'A' is glyph 0, 'Z' is glyph 25,
+     and nothing maps or validates in between.
+   o A SPACE IS AN INVISIBLE 'A'. Rather than special-case the width,
+     it draws glyph 0 with the ink colour set to 0, so a space costs
+     exactly the same code path as a letter.
+   o THE POINTER IS GLOBAL AND THE DRAW ADVANCES IT. A caller never
+     passes a string: it sets g_CreditPtr once and each call consumes
+     one string, stopping on any byte below 0x20. So both 0x00 and
+     0x1f terminate.
+
+   Ten pixels per character, and the glyphs are twelve wide, so they
+   overlap by two.
+
+3.  Text_DrawGlyph, and the font's shape
+
+       SI = SI * 12
+       20 rows of 12 columns:
+           AL = ES:[BP + SI]
+           if AL == 0x0f: AL = DL
+           [DI] = AL
+           [DI + 0x140] = AL
+           SI++, DI++
+         SI += 0x134                  source row stride 320
+         DI += 0x274                  destination advances TWO rows
+
+   So the font is a bitmap 320 bytes per row, each glyph a 12-by-20
+   window at column 12n. TWENTY-SIX GLYPHS AT TWELVE COLUMNS OCCUPY
+   312 OF THE 320 - the alphabet exactly, which is the check that the
+   geometry is read right.
+
+   IT IS NOT A ONE-BIT MASK. Every byte is copied and only the value
+   0x0f is replaced by DL, so 0x0f marks the parts that take the text
+   colour and anything else passes through as it stands. THE SHEET
+   HOLDS EXACTLY TWO INK VALUES - 0x0f for the glyph and 0x1f for the
+   one-pixel outline Font_Unpack adds - so the remap recolours the
+   letter and leaves its outline dark, which is section 5.2.
+
+   AND IT IS DOUBLED VERTICALLY - each source row goes to two
+   destination rows - so a glyph is 12 by 40 on screen from 12 by 20
+   of storage.
+
+4.  Tick_Greetings, the spawner
+
+       g_TextSpawnTick++
+       if (g_TextSpawnTick & 0x1f) != 0: skip      ONE EVERY 32 TICKS
+       SI = g_TrailWritePtr
+       [SI]    = 0
+       [SI+6]  = Rnd_Next >> 9                     a drift
+       [SI+2]  = 0x1400 - (that << 7)
+       [SI+8]  = Rnd_Next >> 9
+       [SI+4]  = 0xc80 - (that << 7)
+       g_TextPenX = [SI+0xa]
+       Text_DrawString
+       [SI+0xc] = (g_TextPenX - [SI+0xa]) << 0xb
+       if CS:[g_CreditPtr] == 0x1f: g_CreditPtr = 0x915a
+
+   THE PEN DISPLACEMENT ACROSS THE DRAW IS THE STRING WIDTH, and it is
+   stored scaled by 0x800 - which is how an item gets centred without
+   a separate measuring pass.
+
+   The ring buffer is the 64 records of 22 bytes at 0x2ad2:0x7a80 that
+   maybe_Scene_SurfaceFlyover clears, so the items ARE the trails the
+   scene is described by - scenes.txt 2.13. One new item every 32
+   ticks, each with a random drift, and sixty-four alive at once.
+
+   0x1f IS THE TABLE'S TERMINATOR, and the wrap target is 0x915a - the
+   FIRST GROUP NAME, not the head of the list. So "QE APPRECIATE" is
+   shown once and the greetings then cycle through the names for ever.
+
+5.  The font sheet
+
+   The sheet is a 320 x 20 strip of 26 cells, each 12 x 20, at
+   0x1e5f:0xad1f. It is RLE-packed at 0x1e5f:0xc345 and Font_Unpack at
+   1000:0c59 expands it IN PLACE:
+
+       ESI = 0xc345, EDI = 0xad1f, bound di + 0x1900
+       each source byte is ONE RUN
+       bit 7      the value - 0x0f if set, 0 else
+       bits 0-6   the length minus one
+
+   0x1900 is 6,400, which is 320 x 20. 995 source bytes expand to
+   exactly 6,400 [verified], and the ink is 0x0f - the same value
+   Text_DrawGlyph remaps to DL.
+
+   IT DECODES IN PLACE AND THE SOURCE IS INSIDE THE DESTINATION. The
+   packed bytes begin 0x1626 into the 0x1900-byte output, so the write
+   pointer reaches them only near the end, by which time the read
+   pointer has passed. Decoding it confirms dest < src holds for every
+   run [verified].
+
+   Rendering the expanded strip gives exactly 26 ink runs, one per
+   12-pixel cell [verified] - the geometry Text_DrawGlyph assumes.
+
+   5.1.  Two tenants of one buffer
+
+      THE BYTES AT 0x1e5f:0xad1f ARE READ TWICE BY DIFFERENT CODE.
+      Image_UnpackRle at 1000:2d10 reads them as a 320x200 picture;
+      Font_Unpack writes the font over them; the glyph blitters then
+      read the font. Both immediates really are 0xad1f - 66 be 1f ad
+      at 1000:2d27 and 66 bd 1f ad at 1000:2dd7.
+
+      THE MAIN SCRIPT SETTLES THE ORDER:
+
+          1000:01fe   call maybe_Scene_RockIntro, which calls
+                      Image_UnpackRle and consumes the picture
+          1000:0208   call Font_Unpack, which overwrites it
+
+      So the picture is used first and the font is expanded over its
+      remains. Neither routine is wrong; the buffer is reused.
+
+      THE PICTURE IS THE LOGO "Vista Lithium" - decoded and rendered
+      [verified]. It fills the screen, rows 13 to 176, in a slanted
+      calligraphic hand, and IT IS MIXED CASE. The glyph sheet holds
+      26 uppercase cells and nothing else, so this image cannot have
+      come from the font at any size - which is the independent proof
+      that the two tenants really are different assets rather than
+      one asset read two ways.
+
+      The asset segment is a chain of packed streams laid end to end:
+
+          0xad1f   4,646 bytes   the title picture, RLE
+          0xbf45   1,024 bytes   g_SinQuarterSrc, 512 raw words
+          0xc345     995 bytes   the font, RLE
+
+      0xad1f + 4,646 is exactly 0xbf45 [verified], which is why the
+      picture's length is known without a length field: the next
+      stream begins where it ends.
+
+   5.2.  The outline pass
+
+      Font_Unpack's second loop runs from 0xae5f for 0x1680 bytes:
+
+          if [di] != 0xf and any of [di+1], [di-1], [di+0x140],
+          [di-0x140] is 0xf:   [di] = 0x1f
+
+      0x140 is 320, the row stride, so that is the four-neighbourhood
+      - A ONE-PIXEL BORDER IN THE NEXT SHADE around every lit pixel.
+      Starting one row in and stopping one row short is what lets it
+      skip bounds checks.
+
+      So a glyph reaches the blitter as ink 0x0f with a 0x1f fringe,
+      and Text_DrawGlyph's remap of 0x0f to DL recolours the ink while
+      leaving the fringe - which is how coloured text keeps a dark
+      outline without the blitter knowing about outlines.
+
+   5.3.  The blend SUBTRACTS for the outline
+
+      Text_DrawGlyphBlend at 1000:2d81 splits on the ink value. The
+      destination's top two bits are its palette band and are put
+      back untouched; the arithmetic is on the 6-bit index inside it.
+
+          AL == 0      transparent, the destination is untouched
+          AL <= 0x0f   AH += AL - DL,  saturating at 0x3f      ADD
+          AL >  0x0f   AH -= AL - 0x10 - DL, flooring at 0     SUB
+
+      THE OUTLINE IS A SHADOW, NOT A LIT PIXEL. The 0x1f fringe takes
+      the SUB path at img 0x2db1, so it darkens what is under it
+      while the 0x0f ink brightens - which is what gives the type its
+      relief against a picture.
+
+      AGAINST A ZEROED BUFFER THE FRINGE FLOORS TO ZERO. 0x1f - 0x10
+      is 0x0f, there is nothing to subtract it from, and JNC at
+      0x2db7 writes 0. So a glyph drawn on cleared memory comes out
+      as ink only, with its counters still zero - which is exactly
+      what Dust_SampleMask needs, since it rejects on zero.
+
+      TREATING THE FRINGE AS LIT IS THE TRAP. Both values are
+      non-zero in the sheet, so a transcription that tests the sheet
+      byte rather than running the blend fills every counter and the
+      glyphs collapse to solid blocks.
+
+6.  The cipher
+
+   The sheet is alphabetical WITH TWO DEVIATIONS: there is no Q, and W
+   occupies Q's vacant slot. Everything after V is therefore stored
+   one place early.
+
+   +-------+-----------+-------+-----------+
+   | Cell  | Displays  | Cell  | Displays  |
+   +=======+===========+=======+===========+
+   | 0-15  | A to P    | 22    | X         |
+   | 16    | W         | 23    | Y         |
+   | 17-21 | R to V    | 24    | Z         |
+   +-------+-----------+-------+-----------+
+
+   So to write W the author typed Q, for X he typed W, for Y he typed
+   X, and for Z he typed Y. Q cannot be displayed at all.
+
+   THAT IS WHY THE STRINGS LOOK CORRUPTED. MUSICPLAXER is MUSICPLAYER,
+   QE APPRECIATE is WE APPRECIATE, COMPLEW is COMPLEX, OWXLON is
+   OXYLON, EWACT is EXACT.
+
+   The mapping is [verified] by rendering stored strings through the
+   decoded sheet: VOTE at 1000:92eb renders as V, O, T, E. Cell 16 is
+   confirmed by shape as well - cells 12 and 16 are the only 12-wide
+   glyphs and they are mirror images, three strokes joined at the top
+   for M and at the bottom for W. Cell 24 is the mirror of cell 18,
+   which is Z against S.
+
+   Cell 25 is a spare the alphabet does not reach. Its shape is not a
+   letter anyone has identified.
+
+7.  The credit roll
+
+   Two lines of type in the lower left of the surface flyover, a new
+   pair every few seconds, each pair fading in as the one before it
+   fades out. Drawn by the four Text_DrawStringAt calls at 1000:1b61
+   through 0x1bbb, after the geometry and the sky and before the
+   present - ./flyover.txt section 1.
+
+   THE TWO PEN VALUES ARE WHOLE BUFFER OFFSETS: 0xbb90 is row 150
+   column 16 and 0xd9a0 is row 174 column 32, so the second line sits
+   four rows below the first and two characters further in.
+
+   EACH PAIR IS DRAWN TWICE, ONCE PER CREDIT. The incoming pair takes
+   g_CreditFade and the outgoing pair - the records 0x18 and 0xc below
+   the pointer - takes 0xf - g_CreditFade, so one dims by exactly the
+   step the other brightens. Since DL of 0xf draws nothing, the pair
+   ahead of the table is never read and the roll needs no special
+   case for its first credit.
+
+   7.1.  The table
+
+      g_CreditTable at 1000:9089. FIXED 0xc-BYTE STRINGS, TWO PER
+      CREDIT, so a credit is 0x18 and g_CreditPtr steps by that.
+      Strings are space-padded and 0-terminated, and the record at
+      1000:9149 begins with 0x1f, which ends the table.
+
+      Decoded through the cipher of section 6 [verified]:
+
+      +-------+-------------+-----------+-----------------+
+      | Index | Line 1      | Line 2    | Line 2 as stored|
+      +=======+=============+===========+=================+
+      | 0     | blank       | blank     |                 |
+      | 1     | LITHIUM     | VISTA     |                 |
+      | 2     | MUSIC       | TOY       | TOX             |
+      | 3     | MUSIC       | EXACT     | EWACT           |
+      | 4     | FONTS       | JANGLER   |                 |
+      | 5     | CODE        | TEO       |                 |
+      | 6     | MUSICPLAYER | S?BY TEO  | SZ BX TEO       |
+      | 7     | blank       | blank     |                 |
+      +-------+-------------+-----------+-----------------+
+
+      The blank pair at index 0 is what the scene opens on, and the
+      blank pair at index 7 is the last thing the roll reaches.
+
+      THE SECOND LINE OF INDEX 6 IS THE ONE STRING THE CIPHER CANNOT
+      SPELL: stored Z selects cell 25, the cell the alphabet does not
+      reach. Cell 25's strokes are its upper-right and lower-right,
+      where S has upper-left and lower-right and Z has upper-right
+      and lower-left; no letter cell shares that pattern [verified].
+      The three are the 5, 2 and 3 of a seven-segment digit, so the
+      line is MUSICPLAYER S3 BY TEO [inferred] - an S3M player, which
+      is what the module is.
+
+   7.2.  What drives it
+
+      Tick_SurfaceFlyover at 1000:63fb, and THE CUE IS THE MUSIC, not
+      a tick count:
+
+          g_CreditTick++
+          if (g_CreditTick & 7) == 0 and g_CreditFade != 0:
+              g_CreditFade--
+          if g_MusicPosLast == g_MusicPos: done
+          g_MusicPosLast = g_MusicPos
+          g_CreditFade = 0xf
+          g_CreditPtr += 0x18
+          if [g_CreditPtr] == 0x1f:            the table's end
+              g_CreditPtr -= 0x18
+              g_CreditFade = 0
+
+      So a credit lasts exactly one order of the module, and in this
+      scene that is 192 TICKS, about 3.4 seconds at 57 Hz - NOT the
+      384 the opening runs at. The speed drops to 3 at order 6 and
+      stays there, ../subsystems/music.txt section 5.4; a port that
+      keeps the stored 6 shows each credit twice as long and arrives
+      at the second one when the demo is on its fourth.
+
+      The fade walks 0xf to 0 one step per eight ticks - 120 ticks of
+      cross-fade, about two seconds - so a credit is visible alone
+      for barely a second before the next begins arriving.
+
+      The scene begins at g_MusicPos 8, tick 2356, and sets g_MusicPosLast
+      to the current position at 1000:1a17, so THE CREDIT INDEX IS
+      THE ORDER MINUS 8 [verified: at tick 2636 the demo holds
+      g_CreditPtr = 0x90b9, index 2, and so does the port].
+
+      THE LAST CREDIT STICKS. Reaching the 0x1f record backs the
+      pointer up and forces the fade to 0, so the blank pair at index
+      7 stays at full strength for the rest of the scene and the roll
+      does not wrap.
+
+      IT CONSUMES g_MusicPosLast AND SO DOES Tick_Default, at
+      1000:6cbc. This handler runs first and takes the change, so the
+      beat strobe there cannot fire during the flyover -
+      ../subsystems/music.txt.
+
+   The port is lithium_text.c, and it is byte-exact: against the
+   demo's own back buffer at order 10, dumped either side of the four
+   draws, the transcription reproduces all 1,431 pixels they touch
+   [verified].
+
+8.  Open questions
+
+   o The scene runner that installs Tick_Greetings. 1000:13e2 is the
+     assignment; the function entry containing it has not been
+     established, because Ghidra has not defined a function there.
+
+   o Scenes 2.3, 2.4 and 2.6 - VISTA, LITHIUM and the credit roll -
+     all presumably use these routines, but which runner drives each
+     is not known. 2.4 has LITHIUM receding, which needs a scale that
+     Text_DrawGlyph does not have, so something else must be involved.

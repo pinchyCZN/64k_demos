@@ -1,0 +1,497 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                   EXCURSION'S ANIMATION DISPATCH
+
+
+Abstract
+
+   Almost every animated parameter in this demo has no writer in any
+   function Ghidra has attributed. They all move in the same place: a
+   per-tick handler dispatched out of Timer_Isr on g_AnimMode, through
+   a word table at 1000:982d.
+
+   That is why "who writes this global" kept coming back empty for
+   g_BurstTicks, g_ScrollPos, g_FireThreshold, g_WarpOfsX and the rest.
+   ALL TWENTY-NINE ARE NOW READ. Which one runs depends on which part
+   of the timeline is running; the table in section 1 is the whole
+   map.
+
+Table of Contents
+
+   1. The dispatch
+      1.1. The tick rate, and what a displayed frame is worth
+   2. The handlers that are read
+      2.1. Mode 0 - the opening
+      2.2. Mode 1 - the countdown
+      2.3. Mode 2 - the landscape flight model
+      2.4. Mode 4 - the planet
+      2.5. Mode 6 - the six warp oscillators
+      2.6. Modes 8 to 0xb - the battle
+      2.7. Mode 0xc - the glow particle spawner
+      2.8. Mode 0xd - the fly-past that respawns
+      2.9. Mode 0x14 - the moon
+      2.10. Mode 0x18 - the car
+      2.11. Modes 0x1a to 0x1c - the end sequence
+   3. The handlers are attributed to no function
+   4. The variable block is initialised data
+   5. The base, and the six words in front of it
+   6. Open questions
+
+1.  The dispatch
+
+   g_AnimMode at 1000:a881 is a byte the script sets per part -
+   Demo_Entry writes 1 through 0x12 across its own parts and
+   Demo_Timeline writes 0x14 through 0x1c [verified]. Timer_Isr uses it
+   to index g_AnimDispatch, which is at 1000:982d [verified]:
+
+       img 0da6   bl = g_AnimMode
+       img 0dab   bx += bx
+       img 0dad   si = cs:[bx - 0x67d3]
+       img 0db2   jmp si
+
+   THE BASE IS 0x982d. As a 16-bit displacement -0x67d3 IS 0x982d, and
+   that is the one number this whole document turns on - see section 6.
+
+   0x1d entries, modes 0 to 0x1c, and the script sets 1 to 0x1c. The
+   six words in front of the table at img 0x9821 are all 0x21fd and
+   are NOT part of it.
+
+   +-------+------------+---------+--------------------------------------+
+   | Mode  | Handler    | Syncs   | What it drives                       |
+   +=======+============+=========+======================================+
+   | 0x00  | img 0x0db4 | -       | THE OPENING. Reached as the STATIC   |
+   |       |            |         | value, not by any write - 2.1        |
+   | 0x01  | img 0x0e73 | 0x04    | the countdown - 2.2                  |
+   | 0x02  | img 0x0e8e | 0x07    | the landscape flight model - 2.3     |
+   | 0x03  | img 0x0f77 | 0x0a    | a camera orbit and a fade schedule   |
+   | 0x04  | img 0x101e | 0x0c,0d | the planet: pan and approach - 2.4   |
+   | 0x05  | img 0x1093 | 0x0c,0d | the rotozoom: zoom and angle         |
+   | 0x06  | img 0x10b8 | 0x0e    | SIX WARP OSCILLATORS - 2.5           |
+   | 0x07  | img 0x11dd | 0x14    | fade only - THE MOIRE part, which    |
+   |       |            |         | advances its own phase               |
+   | 0x08  | img 0x1208 | 0x14+   | Battle_Pursue, and a landmine - 2.6  |
+   | 0x09  | img 0x1264 | 0x19    | the battle, approach - 2.6           |
+   | 0x0a  | img 0x12a5 | 0x1b    | the battle, Lissajous pass - 2.6     |
+   | 0x0b  | img 0x1351 | 0x21    | the battle, locked formation - 2.6   |
+   | 0x0c  | img 0x13db | 0x23    | THE GLOW PARTICLE SPAWNER - 2.7      |
+   | 0x0d  | img 0x147e | 0x25    | THE WARP OUT, and it ends the        |
+   |       |            |         | battle - 2.8                         |
+   | 0x0e  | img 0x15a0 | 0x25,26 | the rotozoom, slowly                 |
+   | 0x0f  | img 0x15c4 | 0x28,29 | the zoom BOUNCES between 0x40 and    |
+   |       |            |         | 0x100 by flipping its velocity       |
+   | 0x10  | img 0x160c | 0x29,2a | object and rotozoom, all decreasing  |
+   | 0x11  | img 0x1646 | 0x2b    | MODE 0x10 PLAYED BACKWARDS           |
+   | 0x12  | img 0x166f | 0x2b,2d | eight bright marks into the work     |
+   |       |            |         | buffer from an 8-slot array          |
+   | 0x13  | img 0x16a8 | 0x2d,32 | mode 0x11 with a slower z            |
+   | 0x14  | img 0x1702 | 0x33,34 | THE MOON - and it does rotate - 2.9  |
+   | 0x15  | img 0x1791 | 0x34,35 | the rotozoom, every other tick       |
+   | 0x16  | img 0x17e5 | 0x37    | THE AIRCRAFT, replaying a RECORDED   |
+   |       |            |         | TRACK. effects/flight.txt            |
+   | 0x17  | img 0x1975 | 0x37    | scrolls the ripple Flag_Render       |
+   |       |            |         | displaces - THE WAVING. effects/     |
+   |       |            |         | flag.txt                             |
+   | 0x18  | img 0x19a0 | 0x3a    | THE CAR - a full vehicle model with  |
+   |       |            |         | four terrain probes a tick. 2.10     |
+   | 0x19  | img 0x1bca | 0x4a    | THE CREDITS SCROLL - base plus a     |
+   |       |            |         | sine wobble that OUTRUNS IT, so the  |
+   |       |            |         | text goes backwards 40% of the time. |
+   |       |            |         | effects/scroller.txt section 5       |
+   | 0x1a  | img 0x1c23 | 0x4b    | THE END LETTERS - and THE ONLY       |
+   |       |            |         | LIGHT ANIMATION IN THE DEMO.         |
+   |       |            |         | effects/theend.txt                   |
+   | 0x1b  | img 0x1c67 | 0x4c    | the same light block, and a fade out |
+   | 0x1c  | img 0x1c8f | 0x52    | the last part: a driven oscillator   |
+   |       |            |         | poking one word, amplitude ramping   |
+   +-------+------------+---------+--------------------------------------+
+
+   EVERY HANDLER MATCHES ITS OWN PART, and that is the check that says
+   the base is right: mode 4's handler moves the planet and mode 4's
+   parts are the planet's, mode 5's moves the rotozoom and mode 5's
+   part runs Roto_Run, modes 9 to 0xb move two craft and their parts
+   run Battle_Run. Read from 0x9821 none of that lines up.
+
+   THE HANDLERS DO NOT RETURN BY RET. Each ends in a JMP to a shared
+   tail - img 0x1d75 for modes 9 and 0xa, img 0x1e22 for mode 0xb, img
+   0x20b6 for most - so Ghidra finds no function at any of them and
+   they carry EOL comments rather than plates.
+
+1.1.  The tick rate, and what a frame is worth
+
+   g_Speed at cs:0x9867 is 100 by static [verified] and Input_Poll's
+   F-keys reprogram it to 25, 50, 200 or 400.
+
+   NOTHING IN THE DEMO WAITS FOR A VERTICAL RETRACE. Demo_WaitTick at
+   img 0x0abc spins on g_TickFlag, the byte Timer_Isr increments at
+   img 0x0b90, and clears it; Vga_Present at img 0x32fa is a bare
+   REP MOVSD of 64000 bytes with no status-port read anywhere
+   [verified]. Scroller_Run does not even call Demo_WaitTick - img
+   0x3010 calls 0x0ace, the keyboard half of it - so the credits
+   free-run as fast as they draw.
+
+   SO THE FRAME RATE IS THE TICK RATE, 100 Hz, for as long as the
+   machine keeps up, and one tick is one frame. Measured on the sync
+   0x4c part: 27 presents in 19 emulated 70 Hz video frames, and the
+   animation handler the same 1.43 per video frame - 100 Hz exactly
+   [observed]. That is also why the F-keys read as a speed control:
+   one rate drives the music, the animation and the frame loop
+   together.
+
+   WHERE THE MACHINE DOES NOT KEEP UP THE FRAME RATE FALLS AND THE
+   TICK RATE DOES NOT. The same emulator manages 13 wave-solver steps
+   in 19 video frames on the sync 0x52 part - about 48 frames a
+   second against a 100 Hz timer [observed], because that frame draws
+   a mesh, solves 16000 cells and refracts 64000 pixels.
+
+   THAT SPLIT IS WHAT ANY PER-FRAME EFFECT DEPENDS ON. A per-tick
+   quantity - a position, an angle, a fade - is unaffected by how
+   fast the machine draws. A per-frame one is not: the wave solver's
+   step, the rotozoom's feedback and the starfield's erase all
+   advance once per frame, so their rate against the music is machine
+   speed. effects/theend.txt section 3 has the case where it shows:
+   the drop's wavelength is the number of solver steps in one 64-tick
+   drive cycle, so a slower machine gives finer ripples.
+
+   THE PORT HAS TO PICK A MACHINE and XCUR_FRAME_HZ is where it says
+   which: 70, so one frame is 10/7 of a tick. Per-tick motion is right
+   at any setting; per-frame work runs at that fraction of the 100 a
+   machine that kept up would give. The demo picks no number at all -
+   its loop runs flat out - so this one is ours, and the last part
+   overrides it because 70 is demonstrably wrong there:
+   effects/theend.txt section 3.
+
+2.  The handlers that are read
+
+2.1.  Mode 0, img 0x0db4 - the opening
+
+   MODE 0 IS REACHED WITHOUT ANY WRITE SELECTING IT. g_AnimMode at
+   cs:0xa881 is statically 0, and the script's first write is img
+   0x0163 - AFTER FireText_Render has already been called at img
+   0x0160. So mode 0 governs the opening part [verified].
+
+       the fade, then a camera integrated from two sine phases
+       cs:0x98f9 and cs:0x98fb, scaled by (cs:0x988d + cs:0x9899)
+       less 0x800, into g_CamWorldX and g_CamWorldZ
+       g_CamAngleNext += sin(g_CarSteerPhase) >> 0xb
+       g_FireTexBase += 0x101
+       g_FireThreshold += g_FireThreshDir
+       at -0x30 the direction flips to +1
+       at 0x110 it flips to -1 AND CALLS Text_BuildMask
+
+   THE THRESHOLD IS A TRIANGLE WAVE AND ITS TOP ADVANCES THE TEXT.
+   Text_BuildMask steps g_FireTextRec by 6 at img 0x3330, so each
+   completed sweep of the flame threshold loads the next line. That is
+   the mechanism behind the opening's two captions. See
+   effects/firetext.txt.
+
+   g_FireTexBase advancing by 0x101 moves the texture one step in each
+   byte at once - the same two-rates-in-one-add idiom as mode 0x17.
+
+   IT ENDS IN A JUMP TO Cam_FollowTerrain, img 0x0e70, so the
+   opening's horizon follows the land the way the car's does. That
+   jump sits THREE BYTES BEFORE MODE 1'S HANDLER at img 0x0e73 and
+   reads like a shared prologue for the handlers after it. It is not:
+   it is mode 0's tail and nothing else reaches it. Giving it to mode
+   2 instead drags g_CamScaleNext down through the approach, and
+   Mesh_SetupTransform's y term is -((g_9460 - g_CamScaleNext) << 5),
+   so the craft sinks where it should climb. effects/camera.txt.
+
+2.2.  Mode 1, img 0x0e73 - the countdown
+
+       dec g_BurstTicks
+       sub g_WarpOfsX, 1
+       add g_WarpOfsY, 0x101
+       sub g_FireHeat, 4
+
+   Four instructions, and they drive the whole countdown: the burst's
+   96-tick life, the warp field the particles drift with, and a flame
+   that COOLS by 4 a tick from the 0xff Countdown_Render sets. See
+   effects/countdown.txt.
+
+2.3.  Mode 2, img 0x0e8e - the landscape's flight model
+
+       dec g_9909, and latch g_9909, g_9881 and g_990b into
+         cs:[0x99a9], [0x99ab], [0x99ad]
+       call 1000:4a22 with (eax, ebx, ecx) = (0, 0, -4)   a rotation
+       sar ebx, 2
+       add g_9368, eax        the target position integrates
+       sub g_9460, ebx
+       add g_936c, ecx
+       mov ecx, ebx / sar ecx, 3 / sub bx, cx
+       sub g_9871, bx         so g_CamScale moves with the climb rate
+       then g_9368 and g_936c minus sin/cos << 3 at g_CamAngleNext,
+         minus g_9360 and g_9364, each shifted right 4 - a steering
+         term from the camera toward the target
+
+   So the landscape's camera is a TARGET-FOLLOWING FLIGHT MODEL, not a
+   scripted path: the script sets a target and the interrupt flies to
+   it. The rotation it uses is Vec_Rotate3 at 1000:4a22 -
+   formats/mesh.txt section 4.
+
+   IT DOES NOT FOLLOW THE TERRAIN. Cam_FollowTerrain has four
+   references and none is mode 2's - see 2.1.
+
+   Both Demo_Entry and Demo_Timeline set g_AnimMode 8 for the voxel
+   parts, so this is the handler that owns the landscape camera.
+
+2.4.  Mode 4, img 0x101e - the planet
+
+   Its parts are sync 0x0c and 0x0d, which are Planet_Render's
+   [verified]:
+
+       inc g_PlanetTexPan
+       g_ObjYaw += 2 ; g_ObjRoll -= 2 ; latch them
+       rotate (0, 0, -0x10) by the latched angles
+       g_ObjTransZ += ecx
+       g_PlanetApproach += 2 * eax
+       g_CamX += eax >> 2 ; g_CamZ += (ecx + 0x200) >> 2
+       if g_FadeLevel != 0: g_FadeLevel += 0x100, Pal_Fade
+
+   SO THE PLANET DOES ROTATE AND DOES SLIDE. The pan advances one a
+   tick, and the approach advances by twice the rotated x of the
+   craft's heading - the planet drifts because the craft is flying,
+   not on a timer of its own. See effects/planet.txt section 3.
+
+2.5.  Mode 6, img 0x10b8 - the six warp oscillators
+
+   Its part is sync 0x0e. SIX INDEPENDENT SINE OSCILLATORS, and they
+   explain Warp_RenderFull's byte-pair assembly completely [verified]:
+
+       g_WarpOsc0..5 += sin(g_WarpOscPhase0..5) >> 3
+       the six phases advance at 2, 3, 4, 5, 6 and 7 a tick
+
+   THE ACCUMULATORS ARE 8.8 FIXED POINT AND WARP_RENDERFULL READS ONLY
+   THEIR HIGH BYTES. The six words sit at 0x98dd, 0x98df, 0x98e1,
+   0x98e3, 0x98e5 and 0x98e7, so their high bytes are 0x98de, 0x98e0,
+   0x98e2, 0x98e4, 0x98e6 and 0x98e8 - exactly the six bytes img
+   0x287b composes into three word offsets, one oscillator in each
+   byte of each offset.
+
+   Six oscillators at coprime rates into three offsets is a
+   non-repeating 2D ripple for the price of six adds.
+
+   The handler ends with A SERVO FADE: the level chases g_FadeTarget by
+   0x100 a tick in whichever direction it needs, and the target itself
+   ramps down once g_MusicPos passes 0x11 and g_TickCount passes 0x30.
+   Every other fade in the demo drives the level directly.
+
+2.6.  Modes 8 to 0xb - the battle
+
+   Three flight models for the same two craft, one per part. The
+   detail is effects/battle.txt section 8; the shape of it:
+
+   +-------+---------+---------------------------------------------+
+   | Mode  | Sync    | What the two craft do                       |
+   +=======+=========+=============================================+
+   | 9     | 0x19    | A flies in, z climbing 0x60 a tick, AND     |
+   |       |         | CLAMPS at 0x1e000. A tumbles; B copies A's  |
+   |       |         | pitch and yaw and rolls the other way       |
+   +-------+---------+---------------------------------------------+
+   | 0xa   | 0x1b    | B flies a LISSAJOUS from two sine lookups   |
+   |       |         | advancing at 4 and 8 - a 1:2 ratio - and    |
+   |       |         | banks by taking its own position >> 7 as    |
+   |       |         | its yaw and pitch. A peels away once its    |
+   |       |         | roll passes 0x708                           |
+   +-------+---------+---------------------------------------------+
+   | 0xb   | 0x21    | LOCKED FORMATION: A at -(forward >> 2) and  |
+   |       |         | B at A + forward, so B is one forward       |
+   |       |         | vector ahead and therefore FARTHER - which  |
+   |       |         | is why Battle_Run flips its draw order on   |
+   |       |         | this mode and only this one                 |
+   +-------+---------+---------------------------------------------+
+
+   Modes 9 and 0xb call Battle_Pursue at 1000:1ce8 first, which closes
+   one sixteenth of the gap between B and a point on A's heading per
+   tick, and modes 8 and 0xc call it too. MODE 0xa DOES NOT: it is the
+   one handler of the four that never calls it, so its peel-away
+   rotate at img 0x131a runs on whatever roll the previous tick's shot
+   loop or Battle_Pursue left in the latch at img 0x99ad.
+
+   MODE 8'S LANDMINE is its camera walk. img 0x1227 sign-extends each
+   of EAX, EBX and ECX from its own LOW WORD, truncating a 32-bit
+   value to 16 bits, and halves it - but img 0x1248 stores EDX for z,
+   which is neither truncated nor halved, and the ECX the code
+   prepares is never used at all. So x and y move by half the
+   truncated forward vector and z by the whole untruncated one.
+   Making the three symmetric changes the camera's path.
+
+   Modes 9 and 0xa then jump to a shared tail at img 0x1d75 which,
+   once g_MusicPos reaches 0x1a, calls Glow_SpawnStep every tick - the
+   32-particle system that feeds Glow_Render - and on row 0x18 of each
+   pattern flashes the screen and bursts the glow. Mode 0xb jumps to
+   img 0x1e22 instead. Both tails then write a shot slot when the
+   music says so and fall into the shot step at img 0x1e9b: see
+   effects/battle.txt sections 2.1 and 2.2, which also say why the two
+   tails fire different craft.
+
+2.7.  Mode 0xc, img 0x13db - the glow particle spawner
+
+   Its part is sync 0x23. THIS IS WHAT FILLS the 32-slot table at
+   0x4a79:0x9980 that Glow_SpawnStep steps - see effects/battle.txt
+   section 3 and 7 [verified]:
+
+       while g_GlowSpawnCount < 0x100, one particle a tick:
+           slot n = g_GlowSpawnCount & 0x1f, at 0x9980 + 9*n
+           x = y = 0x4000          THE CENTRE of the 128x128 field
+           dx, dy = Rand_Next >> 6, twice
+           lifetime = 0x20 - (g_GlowSpawnCount >> 3)
+
+   A radial burst from the middle whose particles live progressively
+   shorter as the count rises, so the explosion thins rather than
+   stopping abruptly. The slot index wraps at 32 while the count runs
+   to 0x100, so each slot is reused eight times.
+
+   The index uses the count BEFORE the increment and the lifetime the
+   count AFTER it, img 0x13ee against img 0x13fb. g_GlowSpawnCount at
+   img 0x9925 has no writer but this increment and is 0 in the image,
+   so the trickle runs once and then stops for good.
+
+   Then Battle_Pursue and mode 8's camera walk, landmine and all - but
+   the fade step is 0x30 rather than 0x60, img 0x1472, and this one
+   does not touch the yaw.
+
+2.8.  Mode 0xd, img 0x147e - the warp out
+
+   Its part is img 0x0750, sync 0x25 [verified], and it ENDS THE SPACE
+   BATTLE rather than repeating: the craft stretches, accelerates,
+   flashes and is gone. effects/battle.txt section 1.2 has it in full.
+
+   g_MeshZScale is both the stretch and the speed - Mesh_TransformVerts
+   scales each vertex's z by it, and img 0x1497 rotates
+   (0, 0, -(zscale << 4)) for the camera and the craft - and it is a
+   growth curve rather than a constant:
+
+       g_MusicRow > 0x20:  += 4, then += (value >> 4)    compounding
+       otherwise:          -= (value >> 5)               decay
+       g_ObjTransZ > 0x20000:  -= (value >> 3)           damping
+       g_ObjTransZ > 0x32000:  WARP OUT
+
+   The warp out puts g_ObjTransX and g_ObjTransZ to 0xfffd8000, sets
+   g_SparkLife to 0x80 and g_SparkShift to 8, flashes g_FadeLevel to
+   0x4000 and calls Glow_Burst. img 0x14ed tests that same 0xfffd8000
+   and skips the whole motion block when it matches, SO IT IS A PARKED
+   SENTINEL, not just a far position - the craft stays gone and the
+   burst is what is left on screen.
+
+2.9.  Mode 0x14, img 0x1702 - the moon
+
+   ITS ONE PART is sync 0x34, img 0x4dd5 - the only write of 0x14 to
+   g_AnimMode in the image. The sync 0x33 part before it is mode 8
+   [verified]:
+
+       every FOURTH tick, g_PlanetTexPan -= 0x100
+       g_ObjRoll -= 4
+       g_ObjYaw and g_ObjPitch += g_TickCount >> 5, which is the
+           ROW counter at img 0x9915, not a tick count
+       fly along the heading, z at half rate
+       camera += the lateral components >> 3
+
+   SO THE MOON DOES ROTATE - backwards, one texture row per four
+   ticks. effects/planet.txt had that as an open question.
+
+   The yaw and pitch increments come from g_TickCount, so they GROW as
+   the part runs: an angular acceleration, not a rate.
+
+   Past row 0x3c it also takes g_FadeLevel down by 0x100 a tick at img
+   0x1784, which is what ends the part on black.
+
+2.10.  Mode 0x18, img 0x19a0 - the car
+
+   554 bytes and the most elaborate handler in the demo. Its part is
+   sync 0x3a, whose runner is Car_Run. The full account is
+   effects/car.txt; what it does, in the order it does it:
+
+       steer     g_Obj2Yaw += sin(g_CarSteerPhase) >> 0xb
+       ease      pitch and roll toward their targets, >> 4
+       drive     g_CarSpeed++ - NO CEILING - then move along the yaw
+       gravity   g_CarVelY--, and when the car is at or below the
+                 ground it snaps up AND the penetration >> 3 becomes
+                 upward velocity. A spring in two instructions
+       pitch     from Terrain_HeightAt 8 cells fore and aft
+       roll      from Terrain_HeightAt 4 cells either side, with the
+                 sine and cosine SWAPPED to turn the axis 90 degrees
+       camera    orbits the car at radius 16
+       fade      out once g_MusicPos reaches 0x39
+
+   FOUR TERRAIN PROBES A TICK, and the two reaches differ - 8 cells
+   along the body against 4 across - so the model has a wheelbase
+   twice its track.
+
+2.11.  Modes 0x1a to 0x1c - the end sequence
+
+   All three carry THE SAME THREE-INSTRUCTION LIGHT BLOCK, verbatim -
+   g_LightPitch += 4, g_LightYaw += 8, g_LightRoll += 0xc - and it is
+   the only light animation anywhere in the demo [verified]. The full
+   account is effects/theend.txt.
+
+3.  The handlers are attributed to no function
+
+   Ghidra's body for Timer_Isr ENDS BEFORE most of these handlers,
+   and
+   get_function_by_address on img 0x0e76 returns nothing - so the
+   blocks are real, reached, and attributed to no function. Nothing
+   they write appears in an xref list.
+
+   The trap: an xref search that comes back with reads and no writes
+   looks like a dead global. Here it means the writer is in
+   unattributed code. Six globals were chased that way -
+   g_BurstTicks, g_ScrollPos, g_FireThreshold, g_FireTextOfs,
+   g_FireTextRows, g_WaterLevel - before the dispatch turned up.
+
+4.  The variable block is initialised data
+
+   img 0x9368 to 0xa888 is INITIALISED DATA, not BSS: 4423 of its 5408
+   bytes are non-zero in the depacked image [verified]. So a global
+   with no writer anywhere still has a real starting value, readable
+   straight out of the dump.
+
+   That is how g_VoxHeightScale 0x1000 and g_WaterLevel 0x21 were
+   recovered after being written off as unknowable - see
+   effects/voxel.txt section 8.
+
+   The distinction that matters: anything the demo COMPUTES is zero in
+   the dump, because it is taken before the first instruction runs -
+   the palette at img 0xc7a4, the plasma buffers, the height fields in
+   the segments above the image. Anything the demo was COMPILED with is
+   there. Check the dump before concluding a global has no value.
+
+5.  The base, and the six words in front of it
+
+   This document first had the table at 1000:9821 and every mode six
+   entries out. The symptom was not an error anywhere - it was that
+   each handler appeared to belong to a part that could not use it:
+   a planet mover in a part with no planet, a rotozoom mover in a part
+   that draws no rotozoom, the two craft animated in parts that run
+   long after the battle.
+
+   SIX IDENTICAL WORDS SIT IN FRONT OF THE TABLE AT img 0x9821, all
+   0x21fd, and they look exactly like a table head - six no-op modes
+   before the real ones. They are not part of g_AnimDispatch. What
+   reads them is not established.
+
+   The arithmetic that settles it, img 0x0dad:
+
+       mov si, word ptr cs:[bx - 0x67d3]      bx = 2 * g_AnimMode
+
+   -0x67d3 in sixteen bits is 0x982d. Nothing else is needed, and the
+   whole-table check in section 1 agrees: read from 0x982d, every
+   handler matches its own part.
+
+6.  Open questions
+
+   o **26 of the 29 handlers are unread.** Each owns the animation of
+     whichever part uses its mode, so reading them is how the remaining
+     parameter mysteries close - g_ScrollPos, g_FireThreshold,
+     g_FireTextOfs, g_FireTextRows and g_SkyGradient among them.
+
+   o **cs:[0x99a9], [0x99ab], [0x99ad]** are latched from g_9909,
+     g_9881 and g_990b by mode 8 and read at the top of Timer_Isr at
+     img 0x0b64. A double-buffer of three animated values, and what
+     reads them downstream is not traced.
+
+   o PARTLY RESOLVED: g_9909, g_9881 and g_990b are g_ObjPitch,
+     g_ObjYaw and g_ObjRoll - mode 8 latches them into the three
+     angles Vec_Rotate3 reads, and mode 8 DECREMENTS g_ObjPitch per
+     tick, so the object tumbles. g_9460 is still unnamed; it feeds
+     Mesh_SetupTransform's y term.

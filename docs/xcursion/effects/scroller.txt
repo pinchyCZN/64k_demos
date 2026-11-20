@@ -1,0 +1,389 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                    EXCURSION: THE TEXT SCROLLER
+
+
+Abstract
+
+   Scroller_Render at XCURSION_U.EXE 1000:30c1. The demo's glyph
+   blitter, and it never draws a glyph: it uses the 8x8 ROM font as a
+   STENCIL over a source image, perspective-scaled per row, so the end
+   credits recede into the distance with a texture showing through
+   them.
+
+   The text is 84 lines of 32 characters at 1000:a435 and it is
+   readable - section 4 quotes it, including the credits, which is how
+   the spaceship is a 3D model.
+
+Table of Contents
+
+   1. The three functions
+   2. The per-row table
+   3. The stencil
+   4. The text
+   5. What moves it - the mode 0x19 handler
+   6. What it is NOT
+   7. The transcription
+      7.1. What the stencil reads, and what draws the stars
+      7.2. Three things a transcription gets wrong
+   8. What the stencil reads
+   9. Open questions
+
+1.  The three functions
+
+   +---------------------+---------------------------------------------+
+   | Scroller_Run        | 1000:3007, the runner                       |
+   | Scroller_BuildRows  | 1000:301f, the font pointer and the table   |
+   | Scroller_Render     | 1000:30c1, the blitter                      |
+   +---------------------+---------------------------------------------+
+
+   Scroller_Run is the standard runner shape [verified]:
+   Scroller_Render, then maybe_Points_RenderErase at 1000:3273, then
+   Vga_Present and Input_Poll, looping while g_MusicPos is below
+   g_MusicPosTarget. So the scroller has a starfield over it and its
+   length is set by the music.
+
+2.  The per-row table
+
+   Scroller_BuildRows at 1000:301f [verified]:
+
+       img 301f  int 10h ax=1130 bh=3 -> ES:BP = the 8x8 ROM font
+       img 3026  ES -> g_FontSeg
+       img 302b  ADD BP,0x7, THEN store to g_FontOfs
+       img 3038  the table is built at 8a79:0x4564, 128 entries of 12
+
+   The +7 matters: g_FontOfs points at a glyph's LAST row, and the
+   blitter indexes `char*8 - sub`, so a glyph is walked upward. Get the
+   sign wrong and the text comes out vertically mirrored.
+
+   THE STEP IS THE RECIPROCAL OF THE WIDTH, and that is the whole
+   trick [verified]. img 0x3063 computes the width as 0x10000 / step,
+   so STEP * WIDTH IS 0x10000 EXACTLY and every row spans precisely
+   256.0 texture units - one full 32-character line - however wide
+   perspective makes it. There is no per-row text fitting anywhere.
+
+   Measured on the transcription:
+
+       +-------+--------+-------+-------+--------------+
+       | row   | step   | width | xoff  | step * width |
+       +=======+========+=======+=======+==============+
+       |  72   |  448   |  146  |   87  |   0xff80     |
+       |  92   |  352   |  186  |   67  |   0xffc0     |
+       | 132   |  246   |  266  |   27  |   0xff9c     |
+       | 172   |  189   |  320  |    0  |   0xec40     |
+       | 199   |  163   |  320  |    0  |   0xcbc0     |
+       +-------+--------+-------+-------+--------------+
+
+   The product falls short of 0x10000 only by the divide's truncation,
+   and falls further once the width clamps at 0x140 - which is the
+   near rows being cropped rather than squeezed. xoff always puts the
+   row's centre on 160.
+
+   img 0x30b1 then adds 0x8000 and backs off half the UNCLAMPED
+   width's worth of steps, which is what centres the text in the line
+   whatever the row does.
+
+   Each 12-byte record, from a divide of 0x800000 by (0xc9 - row):
+
+   +--------+------+---------------------------------------------+
+   | Offset | Size | What                                        |
+   +========+======+=============================================+
+   | +0     |   4  | the row's distance                          |
+   | +4     |   2  | texture step per pixel                      |
+   | +6     |   2  | starting texture coordinate                 |
+   | +8     |   2  | row width, clamped to 0x140. ZERO = SKIP    |
+   | +0xa   |   2  | x offset, centring the row on 0xa0          |
+   +--------+------+---------------------------------------------+
+
+   THE TABLE SHARES ITS ADDRESS WITH THE TWO-SINE HEIGHT FIELD. Both
+   live at 8a79:0x4564 at different times, which is why the Ghidra
+   label there is the neutral g_ScratchField and not g_HeightField.
+
+3.  The stencil
+
+   Scroller_Render at 1000:30c1 [verified]. 128 rows, DI stepping 0xc
+   through the table and the output cursor stepping 0x140, starting at
+   0x5a00 - which is 320*72, so screen row 72.
+
+       DS = 0x5a79      the work buffer, written
+       ES = 0x6a79      the SOURCE the stencil copies from
+       FS = g_FontSeg   the ROM font
+       GS = 0x8a79      the row table
+
+   Per row, the text line comes out of the distance:
+
+       t    = (record[0] - g_ScrollPos) >> 9
+       line = t >> 3           clamped to 0 .. -0x53, so 84 lines back
+       sub  = t & 7            which of the glyph's eight rows
+       g_ScrollerLineBase = line << 5        32 CHARACTERS PER LINE
+
+   Per pixel:
+
+       char = g_ScrollerText[g_ScrollerLineBase + (ah >> 3)]
+       row  = font[char*8 - sub + g_FontOfs]
+       bit  = ~ah & 7
+       bit set   -> work[si] = source[si]
+       bit clear -> work[si] = 0
+       ah += the row's step
+
+   **THE FONT NEVER SUPPLIES A COLOUR.** It decides which pixels
+   survive and segment 0x6a79 decides what they look like. So the
+   scroller is textured, and changing what is in 0x6a79 changes the
+   text's appearance without touching this routine.
+
+   THE CACHE AND THE BIT TEST SHARE ONE REGISTER PAIR. DH holds the
+   last character index and DL the font row byte, so img 0x312e
+   compares DH to decide whether to re-read the font and img 0x3156
+   does BT DX, BX on DL's bits - one register serving both. img 0x3127
+   primes DH to 0xff, which `ah >> 3` can never produce, so the first
+   pixel of every row always loads.
+
+   The cache pays off because at a distance one character spans many
+   pixels, so most pixels reuse the previous byte.
+
+   g_ScrollPos at 1000:937c is subtracted from every row's distance, so
+   advancing it moves the whole block of text toward the viewer.
+   Section 5 is what advances it.
+
+4.  The text
+
+   g_ScrollerText at 1000:a435, 32 bytes per line, and the line index
+   is NEGATIVE - line 0 is at 0xa435 and earlier lines are at lower
+   addresses, 32 bytes apart, for up to 84 of them [verified].
+
+       -1   "    You have been watching      "
+       -4   "          EXCURSION             "
+       -7   "  The first 64kb intro from     "
+       -9   "        Vista Software          "
+       -11  "(First presented at Abduction96)"
+       -16  "           Credits:             "
+       -19  "     Coding.......Teowand       "
+       -20  "     Story (??)...Teowand       "
+       -21  "      Music........Exact        "
+       -22  "       3D-Models...wing         "
+       -23  "                   Exact        "
+
+   "3D-Models" as a credited job is what says maybe_Mesh_Render at
+   1000:43d4 is a real mesh renderer and not a misreading - the demo
+   has models in it because somebody was credited for making them.
+
+   The names here are the same group as the setup-menu credits at
+   img 0x99d5; see subsystems/unpacked_image.txt section 6.
+
+5.  What moves it - the mode 0x19 handler
+
+   img 0x1bca, 89 bytes, reached from g_AnimDispatch index 0x19; its
+   part is sync 0x4a [verified]:
+
+       g_ScrollBase += 0x40
+       bx = g_ScrollWobblePhase & 0x7fc
+       g_ScrollPos = g_ScrollBase + 2 * g_SinTable[bx]
+       g_ScrollWobblePhase += 8
+       g_CamY = g_ScrollPos >> 2
+       g_CamZ = -(g_ScrollPos >> 2)
+
+   THE TEXT SCROLLS BACKWARDS FOR ABOUT 40 PER CENT OF THE TIME, and
+   that is the fact worth having about this part. The base advances a
+   steady 0x40 = 64 a tick, but the wobble amplitude is 2 * 0xfff =
+   8190 - a hundred and twenty-eight ticks of base advance - over a
+   period of only 0x800 / 8 = 256 ticks. Differentiated, that gives a
+   per-tick velocity between -138 and +266 against a base of 64
+   [verified by transcription].
+
+   So the credits do not crawl. They surge toward the viewer and drift
+   back, twice and a half per second at g_Speed 100, while net
+   advancing. A reading that assumed a monotonic scroll would describe
+   something the demo does not do.
+
+   g_SinTable IS SIGNED, +/-0xfff as 32-bit values - img 0x1bdf loads a
+   dword - which is what makes the retreat possible at all.
+
+   THE CAMERA RIDES THE SCROLL. g_CamY is the position >> 2 and g_CamZ
+   its negation, so the viewpoint climbs as the text recedes. Both are
+   WORD stores from a 32-bit value, img 0x1bfa and 0x1c01, so they wrap
+   at 0x10000 and the wrap is load-bearing.
+
+   The fade, img 0x1c05: once g_MusicPos reaches 0x49 - one position
+   before the part's own target of 0x4a - the level drops 0x30 a tick.
+
+6.  What it is NOT
+
+   This was looked for as the producer of FireText_Render's mask, on
+   the reasoning that the ROM font must be rendered into a mask
+   somewhere. IT IS NOT THAT.
+
+   Scroller_Render's segments run the other way: 0x6a79 is its SOURCE
+   and 0x5a79 its destination, where FireText_Render reads 0x6a79 as a
+   mask. Nothing here writes a text shape into 0x6a79.
+
+   What the search did establish is that **0x6a79 is the demo's general
+   scratch buffer**, with seven distinct uses found so far - a radial
+   distance table, a horizon map, a plasma, transformed mesh vertices,
+   this stencil source, Countdown_Render's particle array, and
+   FireText_Render's mask. So "who writes buffer X" is the wrong
+   question for this demo; the right one is what the execution order is
+   around a given call site.
+
+7.  The transcription
+
+   sim/xcursion/parts.py has scroller_build_rows, scroller_render and
+   font_standin; sim/xcursion/demo.py part 24 is the scene.
+
+   TWO STAND-INS, AND THE WINDOW TITLE SAYS SO:
+
+   o THE FONT. img 0x301f fetches it from the VIDEO BIOS with
+     INT 10h AX=1130 BH=3, so THE SCROLLER'S font is not in the image
+     and none can be transcribed for it. font_standin supplies 8x8
+     glyphs that are ours; the letterforms will not match the demo,
+     and lowercase aliases uppercase, which the ROM font does not do.
+
+     src/xcursion/xcursion_scroll.c carries upper AND lower case,
+     because the credits' text is mixed case and the ROM font has
+     real lowercase - but the letterforms are still ours.
+
+     A STAND-IN'S ROWS MUST RUN TOP TO BOTTOM. `sub` FALLS as the
+     screen row descends - dist drops, so t drops - and the blitter
+     indexes font_ofs - sub, which therefore RISES. Store one glyph
+     the other way up and it alone renders upside down while the rest
+     stay upright, which is how the digits were caught.
+
+     THE TEXT CARRIES 0x0a AND 0x0d as separators, so it is not a
+     clean 32-column grid and a line can begin on a control code. The
+     ROM font draws those as CP437 shapes; a stand-in that leaves
+     them blank will differ at the ends of some lines.
+
+     THE DEMO DOES HAVE ITS OWN FONT - g_Font32 at img 0x615e, 32x32
+     and 0x80 bytes a glyph - but only Text_BuildMask and
+     Text_BuildBanner use it. The scroller is the one place that needs
+     the BIOS.
+
+     LANDMINE: THE TWO FONTS HAVE OPPOSITE BIT ORDERS. The 8x8 BIOS
+     font is MSB-left, because img 0x314f takes (~column) & 7; g_Font32
+     is LSB-first, because img 0x33e7 does TEST AH, 1 and shifts right.
+     Author a stand-in in the wrong order and every GLYPH comes out
+     mirrored left to right while the LINES stay correct - which is
+     exactly what it looks like, and is how this was caught.
+
+   o THE SOURCE TEXTURE. What is in segment 0x6a79 when this part runs
+     is section 8's first open question, so the part uses a diagonal
+     ramp of ours.
+
+   Everything else is the demo's: the row table, the distance
+   subtraction, the line indexing and its 0 to -0x53 clamp, the
+   32-characters-per-line base, the glyph cache, the bit test, and the
+   text out of g_ScrollerText.
+
+   THE END-TO-END CHECK IS THAT IT READS. Driven by scroller_tick,
+   nothing is lit until the scroll has advanced far enough to bring a
+   non-blank line forward - line 0 is empty, so early frames stencil
+   nothing - and at scroll position 45320 the screen says
+
+       You have been watching
+
+   which is line -1, exactly what section 4 records at that address.
+   The row table, the clamp, the line base and the text address all
+   have to be right together for that to happen.
+
+7.1.  What the stencil reads, and what draws the stars
+
+   THE SOURCE IS BUILT BY THE PART, img 0x520c, not by the renderer
+   [verified] - which settles what is in segment 0x6a79 when this
+   runs. 320 by 128 from the plasma at 0x2a79 and the sine field at
+   0x8a79:
+
+       shear = (field_word >> 1) * 3 / 4, one per row
+       v     = (plasma_byte >> 1) + 0xa0 - shear, clamped 0 .. 0xbf
+
+   So the credits are lit by a sheared, halved copy of the plasma -
+   a soft diagonal wash - and changing it changes their appearance
+   without touching the blitter.
+
+   THE SHEAR IS THE ROW TABLE, NOT THE SINE FIELD [verified], and
+   the two share an address. img 0x3038 writes the row records to
+   0x8a79:0x4564 - straight over the field Flag_Render and
+   Terrain_HeightAt use - and img 0x521b starts the source builder's
+   BX at exactly 0x4564, stepping it by the records' own 0xc stride.
+
+   What it reads at record+1 is bytes 1 and 2 of the record's `dist`
+   dword, which is (dist >> 8): THE ROW'S OWN STEP. So
+
+       v = (plasma >> 1) + 0xa0 - step * 3 / 8, clamped 0 .. 0xbf
+
+   and the shear is distance itself. The far rows subtract about 168
+   and come out dark, the near rows about 61 and come out bright,
+   with the plasma modulating both - the blue through cyan to white
+   wash the credits are stencilled out of.
+
+   READING THE SINE FIELD THERE INSTEAD gives horizontal black and
+   white bands, because its biased bytes make a word near 0x8080 and
+   every row saturates one way or the other. That is what the mistake
+   looks like.
+
+   THE STARS ERASE THEMSELVES RATHER THAN THE SCREEN BEING CLEARED.
+   img 0x3273 keeps each star's last screen offset in the fourth word
+   of its 8-byte record and blanks it only if that pixel is still
+   0xc0 or above, then refuses to plot over anything that is neither
+   empty nor another star. The stencil's text never reaches 0xc0, so
+   text and stars share one buffer and neither clears it - which is
+   also why a reconstruction that clears every frame loses the text.
+
+   Its colour is 0x100 - (depth >> 3), so nearer stars are brighter.
+
+7.2.  Three things a transcription gets wrong
+
+   All three were caught in src/ and all three are in the listing
+   [verified]:
+
+   o THE TEXT LOOKUP IS A SIXTEEN-BIT ADDRESS. img 0x313b is
+     [BX + 0xa435] with BX holding a NEGATIVE line base, so the sum
+     wraps back into the text. Computing it in 32 bits reads 64 KB
+     past the text and the credits never appear.
+
+   o IT DOES NOT START AT ZERO. g_ScrollPos and g_ScrollBase are both
+     0xa000 by static and no part resets them, which is barely short
+     of the nearest row's distance of 41943 - so the first line is
+     already arriving as the scene opens. Starting from zero costs
+     about ten seconds of blank screen.
+
+   o THE PALETTE IS THE PART'S OWN, img 0x5271. Four bands of 64 -
+     black to blue, blue to cyan, cyan to white, then a GREY RAMP at
+     192. The source tops out at 0xbf and the stars start at 0xc0, so
+     the two bands are what let one buffer carry both. Without it the
+     credits inherit the previous part's palette and read as flat
+     white.
+
+   With those three right the end-to-end check passes: the screen
+   says "You have been watching" over "EXCURSION" [observed].
+
+8.  What the stencil reads
+
+   Established by execution order. The last thing to write segment
+   0x6a79 before Scroller_Run at img 0x5284 is Planet_BuildMap at img
+   0x4e34 - the grey moon's sphere map - which fills the first 0x8000
+   bytes. ABOVE THAT THE SEGMENT STILL HOLDS TUNNEL_BUILDANGLE'S
+   256-WEDGE ANGLE FAN from img 0x090f.
+
+   SI runs from 0x5a00 to about 0xfa00, so the 0x8000 boundary falls
+   about 19 rows down: THE NEAREST ROWS ARE STENCILLED OUT OF THE
+   SPHERE MAP AND EVERYTHING BEHIND THEM OUT OF THE ANGLE FAN.
+
+   Nothing in between touches it. g_MeshVertSeg is 0x3a79 entering
+   Demo_Timeline and 0x7a79 from img 0x519f, never 0x6a79, and
+   Text_BuildBanner writes the CALLER'S segment, which is 0x2a79 at
+   both its call sites.
+
+9.  Open questions
+
+   o **The divide at img 0x304a**, 0x800000 / (0xc9 - row), is the
+     perspective. 0xc9 is 201, one past the screen height, so the
+     divisor is the distance from the horizon in rows; the 0x800000
+     numerator has not been related to anything else.
+
+   o **Why 84 lines** when the text visible above is about 23. The
+     clamp at img 0x3117 is -0x53; whether the rest is blank or unused
+     is unchecked.
+
+   o **Whether g_ScrollBase is reset for the part.** It is a plain
+     code-segment dword and no write to it outside the handler has been
+     found, so the scroll may start from whatever it held.

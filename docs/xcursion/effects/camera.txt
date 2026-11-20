@@ -1,0 +1,311 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                  EXCURSION: THE MUSIC FLIES THE CAMERA
+
+
+Abstract
+
+   The landscape camera has no path and no script of its own. Its
+   speed is read straight out of two of the module's mixer channels,
+   so the flight accelerates when those voices come in and coasts to
+   a halt when the music slides them away. That is the whole
+   mechanism, and it is why the view drifts to the waiting craft and
+   stops there without anything aiming it.
+
+   The handler is img 0x0db4, animation mode 0 - subsystems/
+   animation.txt for the mode table, effects/voxel.txt section 8 for
+   what the camera then draws.
+
+Table of Contents
+
+   1. The speed
+   2. The channel values
+   3. The sequencer, in the detail the camera needs
+   4. What the countdown inherits
+   5. Mode 2, where the craft flies and the camera chases
+      5.1. The title, and the green it burns in
+   6. Mode 3, the launch
+   7. Open questions
+
+1.  The speed
+
+   img 0x0dc5, every tick of mode 0 [verified]:
+
+       cx  = word cs:[0x988d] + word cs:[0x9899]
+       ecx = movzx(cx) - 0x800
+
+       cam_y += (sin(g_98f9) * ecx) >> 13          img 0x0de9
+       cam_x += (cos(g_98fb) * ecx) >> 13          img 0x0e06
+       angle += sin(g_98fd) >> 11                  img 0x0e23
+       g_98f9 += 1 ; g_98fb += 2 ; g_98fd += 2
+
+   The three phases are plain counters from zero, so the SHAPE of the
+   path is fixed and only ecx varies. The sine table is img 0x7f5e,
+   512 dwords to the turn, indexed by phase AND 0x7fc - a byte
+   offset, so a phase step of 1 moves the index only every fourth
+   tick. The cosine is the same table read 0x200 bytes in, and that
+   read runs off the end of one turn into the next without wrapping.
+
+2.  The channel values
+
+   0x988d is not a camera variable. It is channel 0 of an eight-entry
+   array, stride 4, that the module sequencer owns, and 0x9899 is
+   channel 3 of the same array. Each entry holds
+
+       value = (volume << 8) + 0x400
+
+   so the two 0x400 bases are exactly the 0x800 that section 1
+   subtracts, and the speed reduces to
+
+       speed = (volume[0] + volume[3]) * 256
+
+   S3M volumes run 0 to 64, which is the clamp the slide enforces at
+   img 0x2187 and img 0x219e - 0x4400 and 0x400. So the speed spans 0
+   to 0x8000 and IS ZERO WHEN BOTH VOICES ARE SILENT. The variable
+   block's static values are 0x400 in all eight slots, so the
+   landscape starts motionless and the first note is what moves it.
+
+3.  The sequencer, in the detail the camera needs
+
+   img 0x0c68, and it is an ordinary Scream Tracker 3 replayer. Only
+   the parts that reach the camera are set out here; subsystems/
+   music.txt has the module and the output path.
+
+   IT RUNS ON EVERY OTHER TIMER TICK. img 0x0c6d tests bit 0 of its
+   own counter and leaves through the animation dispatch on the tick
+   it skips, so the camera integrates twice per sequencer tick.
+
+   The tables, all built at load time from the module at img 0x0cda0
+   and therefore zero in the file:
+
+   +--------------------+---------+------------------------------+
+   | Table              | At img  | What it holds                |
+   +====================+=========+==============================+
+   | the eight slots    | 0x9428  | opcode + parameter, stride 4 |
+   | the eight values   | 0x988d  | (volume << 8) + 0x400        |
+   | the order list     | 0xc5a4  | one byte per order           |
+   | the pattern table  | 0xb2cc  | one offset per pattern       |
+   +--------------------+---------+------------------------------+
+
+   The module's own order list begins at +0x60. The 32-byte channel
+   table sits at +0x40, BEFORE it, not between it and the header -
+   put it after and every parapointer reads 32 bytes late, which
+   still decodes into plausible rows and quietly plays the wrong
+   patterns.
+
+   THE ORDER LIST CONTAINS MARKERS AND THE REPLAYER SKIPS THEM. An
+   entry at or above the pattern count is not a pattern, so walking
+   the list one-to-one against orders gives a mapping that drifts
+   from the replayer's by however many markers have been passed.
+   Counting a pattern's notes that way puts events in the wrong
+   part - the plasma's pulses read as starting an order early.
+
+   A row is S3M's packed form, read at img 0x0cdc until a 0 byte ends
+   it. The low five bits are the channel and the top three say what
+   follows: 0x20 a note and instrument, 0x40 a volume, 0x80 a command
+   and its parameter. A row with no 0x80 CLEARS that channel's
+   command, at img 0x0d9b.
+
+   Two of those three set the value the camera reads:
+
+   o A VOLUME BYTE sets it outright, img 0x0d52.
+
+   o A NOTE RESETS IT to the instrument's own default volume, img
+     0x226e, taken from the instrument header at +0x1c. This is where
+     nearly all of it comes from - the volume column is rare in this
+     module, and a reconstruction that skips the note payload leaves
+     every channel silent and the landscape stationary.
+
+   Of the commands only three matter here. Command D, the volume
+   slide, is img 0x2130 and is the one that brings the flight down:
+
+       down = par AND 0x0f ; up = par >> 4
+       if down == 0x0f: fine, tick 0 only, slide up by up
+       if up   == 0x0f: fine, tick 0 only, slide down by down
+       otherwise      : every tick EXCEPT tick 0
+       a down of any size cancels the up        img 0x216f
+
+   A NORMAL SLIDE SKIPS TICK 0 AND A FINE SLIDE RUNS ONLY THERE. img
+   0x2161 returns when the row counter is zero and img 0x2140 and
+   0x2153 return when it is not. Inverting the test costs the slide
+   most of its ticks, and the volume never reaches the floor the
+   music wrote it toward. Command A sets the tick divider (img
+   0x2112) and command C steps the order list (img 0x2124).
+
+   At a pattern's end img 0x0cca CALLS THE ADVANCE AND FALLS THROUGH
+   into the read, so the new pattern's first row is taken in the same
+   tick. Returning instead spends one extra tick per pattern, and the
+   camera integrates the difference into a path that drifts.
+
+4.  What the countdown inherits
+
+   The countdown does not stop the camera and nothing else does
+   either. Mode 1 at img 0x0e73 is four instructions - the burst
+   counter, the two warp offsets and the flame's cooling - and not
+   one of them touches the camera. The view holds wherever the flight
+   left it, which is what gives the particles a still background to
+   restore from (effects/countdown.txt section 3.1).
+
+   The opening runs four animation modes and hands over on an order
+   boundary each time, from a watch on img 0xa881 [observed]:
+
+   +-------+--------+-----------+-----------------------------------+
+   | Order | Mode   | At img    | What it does                      |
+   +=======+========+===========+===================================+
+   | 0     | 0      | 0x0db4    | the flight above, and the captions|
+   | 4     | 1      | 0x0e73    | the countdown; camera untouched   |
+   | 5     | 2      | 0x0e8e    | the craft flies, the camera chases|
+   | 7     | 3      | 0x0f77    | the launch                        |
+   +-------+--------+-----------+-----------------------------------+
+
+   The demo switches to the countdown at ORDER 4, ROW 0, with the camera at
+   (-376634, -192574) against the craft's target at (-401408,
+   -200704) [observed, from a watch on img 0xa881]. The sync values
+   throughout the demo are order indices, so the module is the clock
+   the demo keeps for itself - subsystems/music.txt section 5.
+
+   Reaching that point from a cold start takes 989 sequencer ticks,
+   and the reconstruction arrives with
+
+   +----------------+--------------------+--------------------+
+   | At order 4     | The demo           | The reconstruction |
+   +================+====================+====================+
+   | camera x       | -376634            | -376122            |
+   | camera y       | -192574            | -192574            |
+   | heading        | 0xfdaa             | 0xfdac             |
+   | craft tx/ty/tz | -1418/12026/23204  | -1418/12026/23204  |
+   +----------------+--------------------+--------------------+
+
+   The craft's transform is identical, which is the test that
+   matters: the flight puts the camera where the object renderer
+   needs it, with nothing aimed by hand.
+
+5.  Mode 2, where the craft flies and the camera chases
+
+   img 0x0e8e, orders 5 and 6, and it is the handler that moves the
+   altitude and the scale [verified]:
+
+       g_ObjPitch -= 1
+       v = Vec_Rotate3(0, 0, -4) at the object's three angles
+       v.y >>= 2
+       target_x += v.x                             img 0x0ebe
+       alt      -= v.y                             img 0x0ec4
+       target_y += v.z                             img 0x0eca
+       g_CamScale -= (v.y - (v.y >> 3))            img 0x0ed9, 16-bit
+
+   So A UNIT STEP ALONG THE CRAFT'S OWN HEADING MOVES THE TARGET,
+   and section 1's ease then steers the camera after it. The scale
+   moves by seven eighths of what the altitude does, which is what
+   keeps the horizon under the climbing craft.
+
+   Over the two patterns it runs, the reconstruction tracks it to
+   about two per cent:
+
+   +---------------+-----------+--------------------+
+   | At order 7    | The demo  | The reconstruction |
+   +===============+===========+====================+
+   | transform tx  | 4264      | 4266               |
+   | transform ty  | -46442    | -47466             |
+   | transform tz  | 27461     | 27525              |
+   | the altitude  | 15852     | 16032              |
+   | g_CamScale    | 14392     | 14548              |
+   | g_ObjPitch    | -387      | -390               |
+   +---------------+-----------+--------------------+
+
+   THE SCALE REACHES FIVE TIMES ITS STATIC VALUE, which pushes the
+   horizon far down the screen - most of the launch is sky, and that
+   is the demo's own framing rather than a fault.
+
+   THE ALTITUDE IS PROBED FROM THE GROUND, ONCE, BEFORE ANY PART
+   RUNS. img 0x0109 reads the target at img 0x9368 and 0x936c - which
+   at that moment are still the image's own statics, -401408 and
+   -200704, since nothing writes them until mode 2 - calls
+   Terrain_HeightAt with bp 0, MOVZX's the 16-bit result and adds
+   0xc8 into img 0x9460 [verified]. It comes out 0xa10.
+
+   THAT IS WHY THE PARKED CRAFT IS IN FRAME FOR THE WHOLE OPENING.
+   Mesh_SetupTransform's y term is -((img 0x9460 - g_CamScaleNext)
+   << 5) and FireText_Render skips the draw when the returned z is
+   0x28000 or more UNSIGNED, img 0x237d - so an altitude left at its
+   static zero puts the craft out of range until something else
+   writes it, and it appears from nowhere when that happens.
+
+   Two values are still seeded rather than derived, because the
+   parts that set them are timeline parameters we do not run: the
+   y bias at img 0x996d, which is -39 for the countdown and +89 for
+   the launch, and the counter at img 0x98f5, which section 6 needs.
+
+5.1.  The title, and the green it burns in
+
+   THE BANNER IS THE SAME EFFECT AS THE OPENING'S CAPTIONS, with a
+   different palette under it. FireText_Render writes 0x60..0x9f
+   whatever the part - effects/firetext.txt section 1 - so nothing
+   in the fill changes; Pal_BuildGreenRamp at img 0x3e8d rewrites
+   indices 96 to 191 in place after Pal_BuildMain has run:
+
+       96..159   (0, n, 0)          black to green, 64 steps
+       160..191  (2n, 0x3f, 2n)     green to white, 32 steps
+
+   The land, water and grey bands are untouched, which is why the
+   terrain keeps its colour while the letters turn green.
+
+   The text is record 3 of the block at img 0x097b9 - "bEXCURSION",
+   one line at offset 0x6900. The leading 'b' is the half-slot
+   backspace that centres eleven characters in ten slots.
+
+   Mode 2 drives the burn differently from mode 0. img 0x0f4b just
+   DECREMENTS the threshold rather than running the opening's
+   triangle wave, so the flame climbs the letters once and keeps
+   climbing, and img 0x0f44 pans the texture by -0x100 where mode 0
+   pans it by +0x101.
+
+6.  Mode 3, the launch
+
+   img 0x0f77, order 7 on, and THE TRANSFORM IS INTEGRATED RATHER
+   THAN RECOMPUTED - Mesh_SetupTransform is not called, so the
+   stored y and z are stepped directly [verified]:
+
+       g_CamScale += 0x10                          img 0x0f77
+       transform z -= 0xfa                         img 0x0f7d
+       transform y -= 0xfa                         img 0x0f87
+       g_ObjRoll += 4 ; g_ObjYaw += 4
+       cam_x = -(sin(heading) << 4)                img 0x0fa0
+       cam_y = -(cos(heading) << 4)
+       heading -= 4
+
+   The camera is PLACED, not integrated: it sits on a small orbit of
+   the world origin taken straight out of the heading. The craft
+   climbs and closes at the same rate, so it leaves the top of the
+   frame while growing.
+
+   THE SCENE OPENS WHITE AND NOTHING RESETS IT. Mode 2's own fade
+   has already driven the level to Pal_Fade's +0x4000 ceiling by the
+   time this starts, and mode 3 walks it back down at 0x46 a tick,
+   so the landscape and the craft emerge out of white and then go to
+   black. Measured 25 frames in: level +14840, img 0xa87c 1
+   [observed].
+
+   The faster -0x100 fade at img 0x0ff1 is NOT the branch the demo
+   takes. img 0x0fef compares img 0x98f5 with `jl`, and that counter
+   is shared with parts we do not run - it reads -23297 here, so the
+   signed test sends every tick down the slow path.
+
+7.  Open questions
+
+   o The camera x is 512 short at every checkpoint from order 2 on,
+     while y is exact. One camera step's worth, in the cosine half
+     only, and it does not grow - so it is a single step taken or
+     missed near the start rather than a drift.
+
+   o What sets the animation mode. The switch to mode 1 lands at
+     order 4 row 0, but the write at img 0xa881 has not been traced
+     back to the code that decides it.
+
+   o The launch that follows. Mode 3 at img 0x0f77 raises the craft
+     by subtracting 0xfa a tick from its transform's y and z, rolls
+     it 4 a tick, and puts the camera on a small orbit of the origin
+     taken straight from sin and cos of the heading. The fade that
+     ends the scene is img 0x97dd stepped into img 0x3b17 - mode 0
+     steps it by 0x40 to fade the opening IN, and img 0x0f3b steps it
+     by 0x46 once the craft's pitch passes -150. Neither is ported.

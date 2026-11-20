@@ -1,0 +1,174 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                   UKKO: THE ROTOSCOPE DATA
+
+
+Abstract
+
+   The dancing figure's animation: 705 keyframes of 12 joints, held
+   in the code segment, read two joints at a time and interpolated
+   between consecutive frames.
+
+   All [verified] - the format was decoded from the listing and then
+   confirmed by rendering it, which produces a recognisable figure
+   that travels across the screen.
+
+Table of Contents
+
+   1. The data
+   2. A joint
+   3. The skeleton
+   4. The read path
+   5. The interpolation
+   6. Open questions
+
+1.  The data
+
+   +-----------------+--------------------------------------------+
+   | Where           | g_PoseData, 1020:08a5, dump offset 0xaa5   |
+   | Keyframes       | 705                                        |
+   | Stride          | 0x30 bytes - 12 joints of 4                |
+   | Total           | 33,840 bytes                               |
+   | Ends            | an all-zero frame at 1020:8cd5             |
+   +-----------------+--------------------------------------------+
+
+   IT SITS IMMEDIATELY AFTER Line_Draw'S RETF. The routine ends at
+   1020:08a4 with 0xcb and the first keyframe begins at the next
+   byte, which is why the cursor's initial value looks like a code
+   address.
+
+   THE STREAM IS IN THE CODE SEGMENT. Every read carries a CS
+   override, so the data is addressed CS:[cursor + joint].
+
+2.  A joint
+
+   FOUR BYTES, two unsigned words:
+
+       +0   x, word
+       +2   y, word
+
+   Both are read with MOVZX, so they are unsigned - there are no
+   negative coordinates and no sign extension. Values run past the
+   screen edges in places and Line_Draw clips them.
+
+3.  The skeleton
+
+   TWELVE BONES, unrolled in Demo_Main as pairs of joint offsets.
+   Joint n sits at byte offset n*4.
+
+       0 - 1        1 - 2        2 - 3
+       1 - 4        4 - 5
+       0 - 6        6 - 7
+       0 - 8        8 - 9
+       0 - 10       0 - 11       11 - 10
+
+   JOINT 0 IS THE HUB, with five bones leaving it - 1, 6, 8, 10 and
+   11. Joints 10 and 11 are also joined to each other, so 0-10-11 is
+   the one closed triangle in the figure.
+
+   WHICH LIMB IS WHICH, measured over the 670 keyframes in which the
+   figure is on screen and standing [verified]. Height is the
+   fraction of the way down the figure, 0.00 being the crown.
+
+   +----------+--------+-------------------------+-----------------+
+   | Joints   | Height | What                    | Bones, median   |
+   +==========+========+=========================+=================+
+   | 10, 11   |  0.00  | the head's base, across | 11-10  12.2 px  |
+   |          |        | the crown               |                 |
+   | 0        |  0.13  | THE NECK - the hub,     | -               |
+   |          |        | five bones leave it     |                 |
+   | 6, 8     |  0.27  | elbows                  | 0-6 36.6,       |
+   |          |        |                         | 0-8 35.4        |
+   | 7, 9     |  0.32  | hands                   | 6-7 28.9,       |
+   |          |        |                         | 8-9 25.0        |
+   | 1        |  0.49  | THE HIP, down the spine | 0-1 54.8, the   |
+   |          |        |                         | longest bone    |
+   | 2, 4     |  0.74  | knees                   | 1-2 43.0,       |
+   |          |        |                         | 1-4 44.1        |
+   | 3, 5     |  0.97  | feet                    | 2-3 39.0,       |
+   |          |        |                         | 4-5 37.1        |
+   +----------+--------+-------------------------+-----------------+
+
+   So the figure is a head on a neck, two arms off that neck, a spine
+   down to a hip, and two legs off the hip. Nothing in the code names
+   any of it.
+
+   KEYFRAME 0 HAS ALL TWELVE JOINTS AT x=0 - a collapsed figure - so
+   it cannot be used to infer the mapping. Its y values alone put
+   joint 0 where a hip would be, which is the trap: joint 0 is the
+   neck and the 0-1-2-3 chain is spine, thigh and shin together.
+
+4.  The read path
+
+   Per bone, once a frame:
+
+       Demo_Main sets g_JointA and g_JointB to the two offsets
+       Pose_Tween                1020:e823
+         Pose_FetchJointPair     1020:f256, twice
+       Line_Draw                 1020:0497, as PUSH CS / CALL
+
+   Pose_FetchJointPair writes straight into the four Line_Draw
+   endpoint variables - ../effects/stickman.txt section 3 - so there
+   is no intermediate pose buffer anywhere. ONE BONE IS LIVE AT A
+   TIME.
+
+   g_KeyframePtr advances by 0x30 once a frame, at 1020:efda.
+
+   694 OF THE 705 KEYFRAMES ARE PLAYED. g_FrameIndex is tested
+   against 0x2b6 immediately after the advance and the demo exits
+   when it reaches it, so the last eleven frames and the all-zero
+   terminator are never read - ../subsystems/timeline.txt section 1.
+   Nothing rewinds the cursor; the demo does not loop.
+
+5.  The interpolation
+
+   Pose_Tween reads the same joint pair TWICE: once with 0x30
+   subtracted from both offsets, which addresses the previous
+   keyframe, and once without. SUBTRACTING THE STRIDE FROM THE JOINT
+   OFFSET IS THE WHOLE TRICK - one index serves both keyframes, so no
+   second cursor is needed.
+
+   IT THEN BLENDS BY SUB-FRAME. g_PartIndex selects the weight at
+   1020:e885, and there are EIGHT evenly spaced positions between one
+   keyframe and the next:
+
+   +--------------+---------------------------+----------+
+   | g_PartIndex  | Blend                     | Position |
+   +==============+===========================+==========+
+   | 1            | the keyframe itself       |   0/8    |
+   | 3            | (7*prev + 1*cur) >> 3     |   1/8    |
+   | 4            | (3*prev + 1*cur) >> 2     |   2/8    |
+   | 5            | (5*prev + 3*cur) >> 3     |   3/8    |
+   | 6            | (1*prev + 1*cur) >> 1     |   4/8    |
+   | 7            | (3*prev + 5*cur) >> 3     |   5/8    |
+   | 8            | (1*prev + 3*cur) >> 2     |   6/8    |
+   | 9            | (1*prev + 7*cur) >> 3     |   7/8    |
+   +--------------+---------------------------+----------+
+
+   PartIndex 1 NEVER REACHES Pose_Tween. The loop branches to
+   1020:eee0 for it, which draws the same twelve bones calling
+   Pose_FetchJointPair directly - the keyframe with no blend at all.
+
+   EACH WEIGHT IS WRITTEN WITH THE SMALLEST SHIFT THAT EXPRESSES IT,
+   so 2/8 is (3*prev+cur)>>2 rather than (6*prev+2*cur)>>3. The two
+   truncate differently, so the shift is part of the value.
+
+   THE WEIGHTS ARE BUILT BY REPEATED ADDITION. There is no multiply
+   anywhere: 7*prev is the accumulator added to itself six times.
+
+   ONLY THE PartIndex 1 PASS ADVANCES THE CURSOR. The tween path
+   jumps over the advance at 1020:e820, so the keyframe moves once
+   every eight display frames - ../subsystems/timeline.txt section 2.
+
+   SO THE 0/8 POSITION IS THE PREVIOUS KEYFRAME, NOT THE CURRENT ONE.
+   1020:eee0 draws the pose the cursor points at and the add at
+   1020:efda follows it, so once the counter reads kf the frame just
+   drawn was kf-1. Reading 0/8 as the current keyframe puts the
+   figure an eighth ahead on one frame in eight and back on the next,
+   which is a few hundred pixels and looks like a line-drawing fault
+   rather than an indexing one.
+
+6.  Open questions
+
+   o Which limb is which, section 3.

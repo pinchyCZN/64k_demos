@@ -1,0 +1,298 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                       LITHIUM: THE TIMELINE
+
+
+Abstract
+
+   What drives the demo from one scene to the next, and what runs each
+   frame.
+
+   LITHIUM HAS A DISPATCHER WHERE XCURSION HAS NONE, and that was the
+   open question most worth not assuming. The GRAPHICS dispatch is not
+   a jump table - it is ONE PATCHED WORD at g_TickHandler, jumped
+   through by Tick_Dispatch.
+
+   The music replayer does have a real jump table, g_SndEffectTable at
+   1000:80d0 - music.txt. It is the only one in the image.
+
+   Pacing comes from the music twice over. The outer loop spins until
+   the module reaches an order position, and the inner work happens in
+   the PIT interrupt that the mixer programs - so nothing counts
+   frames and nothing waits for retrace.
+
+   All [verified] unless marked.
+
+Table of Contents
+
+   1. The demo renders inside IRQ0
+   2. Demo_RunUntil, and the music as the clock
+      2.1. What each gate costs
+   3. Tick_Dispatch and g_TickHandler
+   4. The twenty-five handler assignments
+      4.1. What each handler does
+   5. Open questions
+
+   Section 1 is the one to read first.
+
+1.  THE DEMO RENDERS INSIDE IRQ0
+
+   This is the fact to read before anything else here.
+
+       Demo_TickIsr       1000:627a   the INT 08h handler - THE ENGINE
+       maybe_Snd_MixTick  1000:73c9   the mixer, called from it
+       Tick_Dispatch      1000:628f   JMP word ptr CS:[g_TickHandler]
+       Tick_Default       1000:6c8e   the common tail and the epilogue
+
+       Demo_RunUntil      1000:0cb9   SPINS until a music position
+       Demo_PollKeys      1000:2d04   Escape and the rate keys only
+       Snd_SelectRateKeys 1000:70a2   F1 to F9 pick the mixing rate
+
+   Demo_Main installs Demo_TickIsr on INT 08h at 1000:01a3, with
+   MOV DX,0x627a then INT 21h AX=2508h [verified]. The handler is:
+
+       PUSHAL, PUSH DS, ES, FS, GS       a full 386 ISR prologue
+       if g_SndRateIdx == 0: jmp 6d15    no sound, skip the mixer
+       call maybe_Snd_MixTick
+       JMP word ptr CS:[g_TickHandler]
+
+   SO EVERY RENDERER IN THE DEMO RUNS AT INTERRUPT TIME, at the rate
+   Snd_SetMixRate programmed into the PIT - which means THE MIXER RATE
+   SETS THE FRAME RATE, and F1 to F9 change both at once.
+
+   THE MAIN LOOP NEVER RENDERS, BUT IT DOES PRESENT. A scene's own
+   loop is Screen_Present then Demo_PollKeys, and all six
+   Screen_Present call sites are immediately followed by a
+   Demo_PollKeys call [verified]. So the work divides:
+
+       Demo_TickIsr      draws, at interrupt time, into 0x4ad2
+       the scene loop    blits with Screen_Present, and polls
+
+   Demo_RunUntil is the other shape - it spins on Demo_PollKeys alone,
+   with no present, for a scene that only needs time to pass.
+
+   Scene_Shatter at 1000:2919 is the clearest example of the
+   loop - ../effects/scenes.txt section 5.
+
+   TWO ROUTINES HERE INVITE THE WRONG NAME. Demo_TickIsr looks like a
+   music replayer, because that is what INT 08h usually carries and
+   because its first call is the mixer; it is the whole engine.
+   Snd_SelectRateKeys looks like the per-frame routine, because
+   Demo_PollKeys calls it once per spin of the main loop; it is the
+   F-key handler.
+
+   GHIDRA'S AUTO-ANALYSIS DEFINES NEITHER Demo_RunUntil NOR
+   Tick_Dispatch, so neither appears in the function map until it is
+   created by hand - which is enough to hide the timeline from
+   anything that works off that map.
+
+2.  Demo_RunUntil, and the music as the clock
+
+       Demo_RunUntil(ax):
+           do:
+               Demo_PollKeys
+           while g_MusicPos < ax
+           ret
+
+   So A SCENE IS A SETUP FOLLOWED BY A MUSIC POSITION TO RUN TO, and
+   the loop body is a keyboard poll rather than a frame - section 1.
+   There are FOUR call sites and all four targets are known:
+
+   +------------+--------+---------------------------------------+
+   | Call       | Target | What it gates                         |
+   +============+========+=======================================+
+   | 1000:025f  | 8      | maybe_Scene_SurfaceFlyover, 1000:0262 |
+   | 1000:0762  | 0x18   | the rest of maybe_Scene_BumpShatter   |
+   | 1000:02ea  | 0x1f   | Scene_Shatter's assemble, 1000:030b   |
+   | 1000:031e  | 0x20   | Scene_Approach, 1000:0321             |
+   +------------+--------+---------------------------------------+
+
+   THREE ARE BETWEEN SCENES AND ONE IS INSIDE ONE. 1000:0762 sits in
+   the middle of maybe_Scene_BumpShatter rather than at its edge, so
+   that runner is two timed halves rather than one scene - the gate
+   is immediately before the pair of stores at 1000:0765.
+
+   g_MusicPos at 1000:8332 is the module's order position. It is a
+   MIRROR, not a counter: the replayer increments g_OrderCursor at
+   1000:7882 and copies it to g_MusicPos at 1000:7461, once per
+   channel of the effect pass, so the two never disagree - music.txt
+   section 6.
+
+   THIS IS THE SAME ARRANGEMENT AS XCURSION, where every part ends on
+   a music order position and there is no retrace wait anywhere -
+   ../../xcursion/README.txt section 5. The two demos differ in almost
+   every technique and agree on this one.
+
+   Demo_PollKeys is thin:
+
+       al = IN port 0x60
+       if al == 1: JMP 1000:03d4        Escape, shut down
+       call Snd_SelectRateKeys
+       ret
+
+   Scancode 1 is Escape and the exit is a JMP, so nothing returns
+   through here on the way out. The port is read directly because
+   Demo_Main masked IRQ1 at the PIC during startup.
+
+2.1.  What each gate costs
+
+   Every handler assignment and every write to g_OrderCursor in a run
+   from the opening to the module's loop point, timed by display
+   frame and converted at 0.8136 ticks a frame - a 57 Hz PIT against
+   the 70 Hz mode 13h refresh, and the rate holds to four figures
+   across the whole run [verified].
+
+   +--------------------+--------+-------+
+   | Scene              | Begins | Ticks |
+   +====================+========+=======+
+   | surface flyover    |   2356 |  2986 |
+   | bump, waiting      |   5342 |    90 |
+   | bump, dust cloud   |   5432 |   572 |
+   | shatter, forward   |   6004 |   294 |
+   | tunnel             |   6298 |   502 |
+   | shatter, assemble  |   6800 |   169 |
+   | approach           |   6969 |   202 |
+   | battle             |   7171 |  1807 |
+   | tower fall         |   8978 |  1811 |
+   | greetings          |  10789 |  2020 |
+   | finale             |  12809 |   951 |
+   +--------------------+--------+-------+
+
+   THE FOUR GATES ARE VISIBLE IN IT. The flyover's handler is
+   installed on the frame g_OrderCursor reaches 8; Tick_Dust at
+   1000:07ed on the frame it reaches 0x18; the assemble 26 frames
+   after it reaches 0x1f; and Tick_Approach on the frame it reaches
+   0x20. The gated scenes therefore cost whatever the module costs,
+   and only the ungated ones - the dust cloud, the forward shatter,
+   the battle, the tower fall - are set by their own state.
+
+   THE BUMP SCENE'S TWO HALVES ARE 90 AND 572 TICKS. The first is
+   the gate at 1000:0762 alone: Tick_Default runs, nothing redraws,
+   and the screen holds the flyover's last frame. Treating the scene
+   as one unbroken whole loses those 90 ticks, and because the
+   tunnel's exit is gated on 0x1f the loss does not stay local - the
+   shatter and the tunnel both start 100 ticks early and the tunnel
+   stretches to cover it.
+
+3.  Tick_Dispatch and g_TickHandler
+
+   Tick_Dispatch at 1000:628f is one instruction:
+
+       JMP word ptr CS:[0x8f64]
+
+   g_TickHandler holds the address of the block that runs this tick,
+   so this patched word is the whole mechanism for the graphics.
+   Poly_Fill does the same thing with g_SpanRoutine, so it is a house
+   idiom rather than a one-off.
+
+   THERE IS ONE JUMP TABLE IN THE IMAGE AND IT IS NOT THIS ONE: the
+   replayer dispatches S3M effects through g_SndEffectTable at
+   1000:80d0 - music.txt. A search for the dispatch has to cover JMP
+   SI and the other register-indirect forms as well as the
+   memory-indirect ones. The graphics path has no table.
+
+   The handlers are short blocks scattered through 0x6294 to 0x6c8e,
+   and EVERY ONE OF THEM ENDS IN JMP 1000:6c8e. So Tick_Default at
+   0x6c8e is the common per-tick work and a handler is a prologue to
+   it, not a replacement.
+
+   A HANDLER CANNOT RETURN NORMALLY. Demo_TickIsr jumps to it and
+   never regains control, so the POP GS/FS/ES/DS, POPAL and IRET have
+   to live at the end of the Tick_Default chain. That is also why the
+   blocks jump rather than call.
+
+   What Tick_Default does, as far as it is read: it eases g_PalFade
+   toward g_PalFadeTarget by g_PalFadeShift once g_PalFadeDelay counts
+   out from 0x18, and it rearms that delay whenever g_MusicPos differs
+   from g_MusicPosLast. SO THE FADES ARE DRIVEN BY THE MODULE
+   ADVANCING, not by a frame count.
+
+   0x6294 is the instruction immediately after Tick_Dispatch, so
+   selecting it means "just fall through".
+
+4.  The twenty-five handler assignments
+
+   The list IS the timeline [verified - every site that writes
+   g_TickHandler]:
+
+       1000:0201 -> 6c8e     1000:1a35 -> 639e
+       1000:02c9 -> 6c8e     1000:1c55 -> 6c8e
+       1000:0415 -> 6b7f     1000:2008 -> 660f
+       1000:0665 -> 6c8e     1000:2037 -> 660f
+       1000:07ed -> 6a23     1000:21f7 -> 6c8e
+       1000:0957 -> 6b35     1000:2374 -> 6756
+       1000:0cc6 -> 6c8e     1000:2496 -> 6c8e
+       1000:0e30 -> 65de     1000:25b4 -> 6965
+       1000:11aa -> 6454     1000:27e3 -> 6c8e
+       1000:13e2 -> 6972     1000:291c -> 644e
+       1000:153a -> 6294     1000:2967 -> 65b1
+       1000:18af -> 6c8e     1000:297e -> 65cc
+                             1000:632d -> 6337
+
+   Nine select Tick_Default, which is a scene saying it wants only the
+   common work. The rest name a specific block.
+
+   1000:632d IS THE INTERESTING ONE: a handler setting the handler.
+   That is how the timeline advances itself, with no outer state
+   machine driving it - the current tick decides what the next tick
+   runs.
+
+   1000:2008 and 1000:2037 both select Tick_PlayEight at 0x660f, the
+   block with eight consecutive Track_Play calls - ../effects/tracks.txt
+   section 4, the battle.
+
+   1000:0e30 selects Tick_Record at 0x65de, which calls Track_Record.
+   Its region is reachable, because 1000:0c7d jumps into it, but
+   nothing proves the shipped timeline gets there.
+
+4.1.  What each handler does
+
+   +-----------+------------------+--------------------------------------+
+   | 0x6294    | -                | Pal_Animate, Pal_Upload, env-map and |
+   |           |                  | planar angles                        |
+   | 0x6337    | -                | the same plus a g_MusicPos test and  |
+   |           |                  | it chains the handler on             |
+   | 0x639e    | -                | three tracks, and it reads           |
+   |           |                  | g_CreditPtr                          |
+   | 0x644e    | Tick_Shatter     | Shatter_Step                         |
+   | 0x6454    | Tick_Finale      | the walk - ../effects/figure.txt     |
+   | 0x65b1    | Tick_SpinUp      | eases g_RotAngleZ up and drags       |
+   |           |                  | g_RotAngleX with it                  |
+   | 0x65cc    | Tick_SpinDown    | eases g_RotAngleX the other way      |
+   | 0x65de    | Tick_Record      | Track_Record - effects/tracks.txt    |
+   | 0x660f    | Tick_PlayEight   | eight tracks - the battle            |
+   | 0x6756    | Tick_TowerFall   | three tracks and a track-position    |
+   |           |                  | cue                                  |
+   | 0x6965    | -                | calls nothing, touches no named      |
+   |           |                  | global                               |
+   | 0x6972    | Tick_Greetings   | spawns text - effects/text.txt       |
+   | 0x6a23    | Tick_Dust        | both dust fills - effects/dust.txt   |
+   | 0x6b35    | Tick_Rock        | slot target and home through the     |
+   |           |                  | SECOND rotation set                  |
+   | 0x6b7f    | Tick_Slots1      | the same, without the dust           |
+   | 0x6c8e    | Tick_Default     | the common tail and the ISR epilogue |
+   +-----------+------------------+--------------------------------------+
+
+   Tick_Slots1 and Tick_Slots2 are the only consumers found of
+   g_SlotFlight{X,Y,Z}, and they feed them through Vec_RotX2,
+   Vec_RotY2 and Vec_RotZ2 - a second rotation frame at 0x8f1a,
+   0x8f1c and 0x8f1e laid out exactly like the first at 0x8f14,
+   0x8f16 and 0x8f18.
+
+
+5.  Open questions
+
+   o WHETHER THE DEMO EVER RECORDS AS IT RUNS. Section 4. The honest
+     answer is that the path exists and is reachable, and that nothing
+     has been traced from Demo_Main to it.
+
+   o maybe_Snd_MixTick at 1000:73c9, 759 bytes, called from the ISR
+     before the graphics dispatch. music.txt has what is read of it.
+
+   o What each of the sixteen named handler blocks does. Three are
+     identified: Tick_Record, Tick_PlayEight and Tick_Default.
+
+   o g_MusicPos at 1000:8332 is read here and written by the replayer,
+     which is unread. It also appears in 1000:18a3, copied to 0x8fc2
+     at scene start - presumably to remember where the scene began.

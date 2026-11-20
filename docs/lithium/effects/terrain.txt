@@ -1,0 +1,302 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                      LITHIUM: THE PLANET SURFACE
+
+
+Abstract
+
+   THE SURFACE IS NOT A VOXEL RENDERER. It is a grid mesh, rebuilt
+   every frame from a 128x128 heightmap and pushed through the same
+   polygon pipeline as the ships and the tower.
+
+   That is worth stating plainly because it looks like a voxel
+   landscape and because XCURSION's equivalent IS one - a y-buffer
+   span fill, ../../xcursion/effects/ground.txt. The two demos solve
+   the same shot in completely different ways.
+
+   Two routines: Terrain_Build at 1000:4b3c emits the grid,
+   Terrain_Height at 1000:4067 gives each vertex its y. Everything
+   here is [verified] from those two unless marked.
+
+Table of Contents
+
+   1. Terrain_Build
+   2. Terrain_Height, and the world scroll
+   3. Why it looks like a fine mesh
+   4. Where it appears
+   5. Where the heightmap comes from
+   6. Open questions
+
+1.  Terrain_Build
+
+   It does NOT go through Mesh_Load or Mesh_Transform. It writes
+   16-byte vertex records straight into the pool in segment 0x2ad2 and
+   increments g_VertPoolCount itself - subsystems/mesh3d.txt section 2
+   is the record layout it is filling in.
+
+       strips = ((g_SpanRowMax - g_SpanRowMin) >> 5) + 1
+       per strip, per column:
+           INC g_VertPoolCount
+           ES:[DI+0x00] = x       stepping 0x100 along the strip
+           ES:[DI+0x04] = z       stepping 0x100 between strips
+           CALL Terrain_Height    which writes ES:[DI+0x02], the y
+           DI += 0x10
+
+   So the extent is driven by g_SpanRowMin and g_SpanRowMax, in steps
+   of 0x20, and the mesh is REBUILT EVERY FRAME from wherever the
+   camera is. An endless surface then costs nothing to store, which is
+   the whole point in 64 KB.
+
+   Before the grid it builds a camera-aligned quad into g_PolyArgs at
+   CS:0xe1b2 - four (x, y) WORD pairs, a square about 128,128 turned
+   by the camera's yaw and sized by its pitch - and calls
+   Poly_ScanEdges on it at 1000:4c0c. THAT QUAD IS THE FOOTPRINT, not
+   a backdrop: scan-converting it is what fills in the row range and
+   the per-row x spans that the two passes below then walk.
+
+   So the extent is not computed, it is RASTERISED. g_SpanRowMin and
+   g_SpanRowMax are the span row range Poly_ScanEdges writes, held as
+   row << 5 because the table is indexed by byte offset [verified].
+
+   1.1.  How the face pass knows where each row starts
+
+      The vertex pass emits rows of vertices and the face pass joins
+      consecutive rows, so it has to know the pool index each row
+      began at. The original passes that between the passes by
+      STASHING THE VERTEX-POOL BYTE OFFSET INTO THE SPAN RECORD -
+      1000:4c5c and 1000:4c61 write it into one row's +6 and the
+      next row's +4, and 1000:4cdc and 1000:4ce1 read it back and
+      shift right 4 to turn 16-byte records into indices [verified].
+
+      Nothing else in the demo reuses a span that way, and the two
+      words it borrows are part of the u interpolant that this call
+      never needs - Poly_ScanEdges is a 2D scan and writes no u or v.
+
+   1.2.  The face pass
+
+          strips = (g_SpanRowMax - g_SpanRowMin) >> 5     one fewer
+          per strip, per column of that row's own x span:
+              g_FacePoolCount += 2
+              triangle (b+1, a+1, a) and (b, b+1, a)
+              both carry g_TerrainAttr from 1000:8fa6
+              a += 1;  b += 1
+
+      So two triangles a column, a and b being the two rows' bases.
+      That answers what emits the faces: Terrain_Build does, in a
+      second pass over the same spans.
+
+   1.3.  A strip spans the union of two rows
+
+      1000:4c51 takes the smaller x0 of this row and the last and
+      1000:4c7b the larger x1, and the count is that difference plus
+      two - so neighbouring rows always have a vertex to meet at.
+
+   1.4.  The count depends on the PREVIOUS frame
+
+      Poly_ClearSpans resets only the rows the last polygon touched -
+      ../subsystems/raster.txt section 6.4 - so when Terrain_Build
+      scans its quad the table still holds leftovers from the last
+      polygon of the frame before, and those widen the x spans it
+      reads back. The emitted count is therefore frame-history
+      dependent, and reproducing it exactly needs the whole frame
+      reproduced [verified: a clean table gives 302 vertices and 536
+      faces for the flyover's camera, where the demo emits 336 and
+      600].
+
+2.  Terrain_Height, and the world scroll
+
+       ax >>= 8;  bx >>= 8            world x and z to map units
+       bh = al
+       bh -= g_SlotPosX >> 0xc
+       bl += g_SlotPosZ >> 0xc
+       bl += bl;  bx >>= 1;  bx &= 0x3fff
+       al = DS:[bx]                   THE HEIGHTMAP BYTE
+       ES:[DI+0x02] = (al - 0x80) << 3
+
+   THE INDEX TRICK IS A 7-BIT STRIDE. ADD BL,BL drops BL's top bit
+   and SAR BX,1 halves the pair, so what comes out is
+   (row & 0x7f) << 7 | (col & 0x7f): a 128-wide map that wraps on
+   both axes, which the 0x3fff mask then bounds.
+
+   U AND V ARE THE SLOPE, NOT A POSITION - 1000:40a4 onward:
+
+       du = (h - h[+1])    << 9       the next column
+       dv = (h - h[+0x80]) << 9       the next ROW
+       each += 0x3f80, floored at 0 and capped at 0x7e81, then >> 7
+
+   So every vertex's sphere-map coordinate is the local gradient and
+   THE SURFACE IS SHADED BY ITS OWN RELIEF through the chrome map -
+   which is the other half of why it reads as finer than its geometry
+   [verified].
+
+   The 0x3fff mask makes the map 0x4000 bytes, so it is 128x128, and
+   0x80 is sea level with the height scaled by eight about it. The map
+   wraps, which is the other half of why the surface is endless.
+
+   g_SlotPosX AND g_SlotPosZ ARE THE COARSE WORLD POSITION, in units
+   of 0x1000, and scrolling them is what flies the camera over the
+   surface. Mesh_Transform applies the same two values to every
+   object, shifted right by 0xc and left by 8, which is what keeps the
+   ships and the tower moving with the ground -
+   subsystems/mesh3d.txt section 3.2.
+
+3.  Why it looks like a fine mesh
+
+   Three things together, and none of them is a voxel step:
+
+   o The grid is dense. Vertices are 0x100 world units apart and the
+     strips 0x100 apart, so a surface filling the screen is hundreds
+     of quads.
+   o Every one of those polygons is TEXTURE-MAPPED, because there is
+     no flat-fill path at all - subsystems/raster.txt section 4. So
+     the surface carries detail finer than its own geometry.
+   o The heightmap is 128x128 and wraps, so the relief repeats at a
+     scale much larger than the grid.
+
+   The banding a voxel renderer gives comes from its column stepping.
+   Here the same look comes from the palette: a texel plus the face
+   attribute's band offset lands in a 64-entry ramp, and g_Pal2's
+   first two bands are blue and cyan dominant -
+   subsystems/texture.txt section 7.
+
+4.  Where it appears
+
+   Terrain_Build is called from FOUR scene runners: 1000:18a3,
+   1000:1c4f, 1000:21eb and 1000:2496 [verified].
+
+   That matches the four scenes the surface appears in -
+   scenes.txt 2.5, 2.8, 2.9 and 2.12: the first fly-over, the starship
+   chase, the tower with the two ships circling, and the battle.
+
+   So one terrain routine serves every surface shot, and what differs
+   between them is the camera, the palette and which models are also
+   in the pools.
+
+5.  Where the heightmap comes from
+
+   Terrain_Generate at 1000:52dd, once:
+
+       g_RndState0, g_RndState1 = 0xa5b5, 0xcab6     A FIXED SEED
+       DS = 0x4ad2
+       Terrain_DiamondSquare                          256 x 256
+       fill 20 rows of 20 bytes at 0x7676 with 0xff
+       cx = 5;  Tex_Blur
+       copy 0x80 rows of 0x80 bytes from 0x4014 to 0x1e5f:0
+
+   THE HEIGHTMAP LIVES AT 0x1e5f:0000 - the asset segment - and that
+   is what Terrain_Height indexes. It is generated in the BACK BUFFER
+   and only the finished 128 x 128 window is copied out, so the
+   working grid is twice the size of the result and the ragged edges
+   of the diamond-square are discarded.
+
+   THE SEED IS FIXED, so the landscape is identical on every run -
+   the same trick the starfield uses, effects/sky.txt section 4.
+
+   THE PORT'S MAP IS BYTE-IDENTICAL to the demo's across all 16,384
+   bytes of the 128x128 window [verified against a dump of
+   1e5f:0000]. That is the whole of Terrain_Generate,
+   Terrain_DiamondSquare and Terrain_Displace confirmed at once,
+   including the torus wrap and the five blurs.
+
+   THE MAP IS NOT IN THE IMAGE. The asset segment reads as zeros
+   there, so it is BSS that only this routine fills - a port that
+   indexes the image instead gets a dead flat surface.
+
+   THE PLATEAU IS WHERE THE TOWER STANDS. 0x7676 is row 118, column
+   118 of the working grid, and 20 x 20 of 0xff is a flat maximum, so
+   the tower has level ground under it.
+
+   5.1.  Terrain_DiamondSquare
+
+      1000:3ed6. Classic midpoint displacement:
+
+          [0] = Rnd_Next
+          g_TerrainStep = 0x8000;  g_TerrainHalfStep = 0x80
+          g_TerrainRough = 1
+          per level:
+              sweep in steps of g_TerrainHalfStep * 2:
+                  centre = the four corners averaged, displaced
+                  four edge midpoints = each adjacent pair halved,
+                      displaced
+              step >>= 1;  halfstep >>= 1;  g_TerrainRough += 1
+          until halfstep == 0
+
+      THE ROUGHNESS SHIFT RISES BY ONE PER LEVEL and
+      Terrain_Displace shifts its random by it, so each level
+      displaces half as far as the last. Persistence 0.5, written as
+      an increment rather than a multiply.
+
+      IT WRAPS: a midpoint that would fall off the right edge is
+      written at si - 0x100 instead, so the map is a torus and the
+      relief repeats seamlessly. That is what lets the flight scenes
+      run over it forever.
+
+   5.2.  Terrain_Displace
+
+      1000:4044.
+
+          dx = ((Rnd_Next & 0x7fff) - 0x4000) >> g_TerrainRough
+          ax += dx;  clamp to 0 .. 0xff
+
+      Masking to 0x7fff and subtracting 0x4000 gets a signed offset
+      out of an unsigned generator with no sign test.
+
+   5.3.  The blur is Tex_Blur
+
+      The five smoothing passes call 1000:4aee, which is the same
+      routine that smooths the chrome environment map -
+      ../subsystems/texture.txt section 4. One blur serves both the
+      texture and the landscape.
+
+6.  The surface's texture
+
+   Segment 0x5ad2, and THE SURFACE IS NOT DRAWN WITH THE SPHERE MAP -
+   which is how this was caught, because the demo's back buffer holds
+   values above 0x7f and no sphere-map texel can.
+
+   Tex_BuildGlowNoise at 1000:57e1 fills it: a radial falloff from
+   (0x30, 0x30) with noise on top.
+
+       d  = sq(|x - 0x30|) + sq(|y - 0x30|)      the square table
+       si = Math_Sqrt(d << 2) >> 4
+       ax = 0x104 - si - (si >> 2)
+       ax += Rnd_Next() >> 0xd, then that >> 1 again
+       clamp 0 to 0xff, and anything past 0xfc is black
+       one Tex_Blur pass
+
+   THEN THE CONTRAST IS HALVED AND THE FLOOR PINNED - 1000:5883. A
+   byte below 0x81 is raised to it and every byte becomes
+   0x81 + (v - 0x81) / 2, so the finished texture lives in 0x81 to
+   0xc0. Leaving that pass out puts it about 17 too bright everywhere.
+
+   6.1.  Math_BuildSquareTable and Math_Sqrt
+
+      1000:5334 fills 1,600 dwords with (n+1) squared, and
+      1000:4a91 is a BISECTION OVER THAT TABLE rather than an
+      arithmetic root - it returns the byte offset of the closest
+      entry, which is why callers shift the result down.
+
+      IT OVERLAYS THE SPAN TABLE. 1,600 dwords is 6,400 bytes, which
+      is exactly 200 rows of 32 at 1000:c8b2, and the squares are
+      only wanted while the textures are generated and no polygon has
+      been drawn. 1000:5354 then leaves the span row range at the
+      whole screen so the first Poly_ClearSpans sweeps all of it.
+
+   THE PORT'S TEXTURE MATCHES IN 65,535 OF 65,536 BYTES [verified].
+   The one exception is byte 0, which the demo holds at 1 - below the
+   floor this pass pins - so something later in the transition writes
+   it. Flare_BuildSprite and Tex_BuildThreeGlows both target the same
+   segment.
+
+7.  Open questions
+
+   o What face attribute ZERO means in Poly_Fill, which the tower is
+     drawn with. g_TerrainAttr at 1000:8fa6 is 0x5ad2 for the grid.
+
+   o THE CAMERA SINKS THROUGH THE SURFACE in the port if it is left
+     running. Terrain_HeightAtSlot NEGATES the map byte and scales it
+     by 1 << 7 where the grid's own vertices take it unnegated at
+     1 << 3, so the two are in different frames, and which one the
+     drawn camera should be compared against is not settled.
+

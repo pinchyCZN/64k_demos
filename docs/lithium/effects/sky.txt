@@ -1,0 +1,423 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                 LITHIUM: THE STARS, SUN AND FLARE
+
+
+Abstract
+
+   Scene 2.7 of effects/scenes.txt. It is NOT A SCENE RUNNER: the
+   stars, the sun and the flare are drawn every frame of
+   maybe_Scene_SurfaceFlyover's one loop, and what the viewer reads as
+   a separate shot is the camera tilting up.
+
+   THE STARFIELD COSTS NOTHING TO STORE. 1024 stars are regenerated
+   every frame from a PRNG reseeded with two fixed constants, so the
+   same positions come out each time. Held as coordinates they would
+   be 6 KB of a 64 KB intro.
+
+   THE OCCLUSION TEST IS ONE PIXEL. The sun is projected, the back
+   buffer is read at that exact address, and the flare is drawn only
+   if the pixel still holds the background fill.
+
+   All [verified] from the routines unless marked.
+
+Table of Contents
+
+   1. The routines
+   2. The sun is a direction
+   3. The occlusion test
+   4. The free starfield
+   5. The flare
+   6. The additive blit
+   7. The port
+      6.1. One sprite, every size
+      6.2. Looking at the sun washes the screen out
+   8. Open questions
+
+1.  The routines
+
+   The first three are called once a frame, in this order, from
+   maybe_Scene_SurfaceFlyover at 1000:1b50, 1b53 and 1b56.
+
+   THE FIRST OF THEM NEVER RUNS. Both of maybe_Sky_DrawPoint's call
+   sites gate on g_SkyPointsOn at 1000:8f5a - the flyover at
+   1000:1b48 and maybe_Scene_Battle at 1000:21bd - and nothing in the
+   image writes that byte. It ships as 0 and reads 0 in the emulator
+   throughout the battle, so the routine is dead code and the port
+   leaves it out [verified].
+
+       maybe_Sky_DrawPoint    1000:414d   one 2x2 dot
+       Sky_SunAndStars        1000:425b   the sun, then 1024 stars
+       Flare_Render           1000:4476   the flare elements
+       Flare_DrawSun          1000:4754   the sun's own disc
+       Flare_DrawElement      1000:47f5   one flare element
+       Sun_GlareFade          1000:46f3   brightness -> the fade
+       Flare_ClipSetup        1000:49df   crop and clip
+       Flare_BuildSprite      1000:5363   the one sprite, at
+                                          1000:0238 and 1000:02c6
+
+2.  The sun is a direction
+
+   Sky_SunAndStars starts from a CONSTANT VECTOR:
+
+       eax, ebx, ecx = (-0x800, -0x12c, -0x400)
+       rotate by g_SlotAngleY, then g_SlotAngleX, then g_SlotAngleZ,
+           SAR 9 after each
+       return if ecx < 0x3e8
+       perspective divide, + 0xa0 and + 0x64
+       g_SunScreenX, g_SunScreenY = the result
+
+   IT IS NEVER TRANSLATED BY THE CAMERA POSITION, only rotated - so
+   the sun sits at infinity and does not drift as the camera flies.
+   That is the whole of the sky model.
+
+   g_SunScreenX and g_SunScreenY are set to 0xff80 first, which is the
+   mark Flare_Render tests to decide the sun is not on screen.
+
+3.  The occlusion test
+
+   Still inside Sky_SunAndStars, after the projection:
+
+       clamp the position to the screen
+       bx = y*320 + x
+       DS = 0x4ad2
+       g_SunVisible = ([bx] == 0x80) ? 0 : 0x8000
+
+   SO 0x8000 MEANS BLOCKED and 0 means clear.
+
+   0x80 IS THE BACK BUFFER'S FILL VALUE - Tex_SnapshotFrame and
+   1000:5526 both fill 0x4ad2 with 0x80808080 - so a pixel still
+   holding it means nothing has been drawn over the sun this frame.
+
+   ONE BYTE READ IS THE ENTIRE VISIBILITY QUERY. There is no depth
+   buffer in the demo and none is needed: the terrain and the ships
+   are drawn before this runs, so their pixels are already present
+   wherever they cover the sun.
+
+   THE RESULT IS NOT USED DIRECTLY. Tick_TowerFall eases
+   g_FlareEnergy toward it by a quarter each tick -
+   effects/towerfall.txt section 5 - and Flare_Render gates on that,
+   so a sun sliding behind a ridge dims the flare over several frames
+   instead of switching it off.
+
+4.  The free starfield
+
+       g_RndState0, g_RndState1 = 0xcd57, 0xb6b5
+       cx = 0x400
+       per star:
+           cs:[0x8f59] = Rnd_Next                  a shade
+           ecx, ebx, eax = three Rnd_Next, sign-extended to 32 bits
+           ebx -= 0x5000
+           eax >>= 4;  ebx >>= 5;  ecx >>= 4
+           rotate by the same three angles, SAR 9 after each
+           skip if ecx < 1
+           perspective divide
+
+   RESEEDING WITH A CONSTANT IS WHAT MAKES THIS WORK. The generator
+   is deterministic, so the same 1024 positions are produced every
+   frame and the starfield holds still while the camera turns.
+
+   The cost is zero bytes. The price is that the layout cannot be
+   authored - it is whatever Rnd_Next yields from 0xcd57, 0xb6b5 -
+   and that the stars must be re-projected every frame rather than
+   stored once.
+
+   ebx is biased by -0x5000 and shifted one bit further than the
+   other two axes, so the field is flattened and pushed below the
+   camera rather than being an even cube.
+
+5.  The flare
+
+   Flare_Render, once the sun is on screen and g_FlareEnergy is
+   below 0x7f00 - that is, the sun is not yet fully blocked:
+
+       g_FlareColour = g_FlareBrightness;  g_FlareSize = 0x50
+       Flare_DrawSun
+       ax = 0xa0 - g_SunScreenX
+       bx = 0x64 - g_SunScreenY
+
+   (ax, bx) IS THE VECTOR FROM THE SUN TO THE CENTRE OF THE SCREEN,
+   and every element sits at a multiple of it. THIRTEEN of them, in
+   this order [verified from the call sites]:
+
+   +----+-----------+--------+----------------------+-------------+
+   | #  | Call site | Colour | Multiple of (ax,bx)  | Sun at      |
+   |    |           |        |                      | (110,130)   |
+   +====+===========+========+======================+=============+
+   | 1  | 1000:4517 | 0x01   | 2 + 1/4 + 1/8        | (228,  58)  |
+   | 2  | 1000:4537 | 0x80   | 2                    | (210,  70)  |
+   | 3  | 1000:456b | 0xc0   | -1/2 + 1/8 + 1/32    | ( 92, 140)  |
+   | 4  | 1000:458b | 0xac   | 1/2                  | (135, 115)  |
+   | 5  | 1000:45bb | 0x9c   | 1 + 1/2 - 1/8        | (179,  89)  |
+   | 6  | 1000:45cd | 0xe4   | 1 + 1/2 - 1/8        | (179,  89)  |
+   | 7  | 1000:45f7 | 0xd6   | 1/2 + 1/16           | (138, 113)  |
+   | 8  | 1000:462d | 0xce   | 1 + 1/2 - 1/8 - 1/16 | (176,  91)  |
+   | 9  | 1000:4657 | 0xe4   | 1/2 - 1/16           | (132, 117)  |
+   | 10 | 1000:467f | 0xe4   | 1/2 + 1/4            | (147, 107)  |
+   | 11 | 1000:4697 | 0xf6   | 1                    | (160, 100)  |
+   | 12 | 1000:46c3 | 0xf0   | 1 + 1/8 + 1/32       | (167,  95)  |
+   | 13 | 1000:46ed | 0xdc   | 1 + 1/2 + 1/8        | (191,  81)  |
+   +----+-----------+--------+----------------------+-------------+
+
+   EVERY MULTIPLE IS SHIFTS AND ADDS. There is no multiply and no
+   table of offsets - each element's position is open-coded, which is
+   why the routine is 0x27d bytes of straight line rather than a loop
+   over a table.
+
+   THE SHIFTS COMPOUND WITHIN A BLOCK. Each element restores the
+   vector from the stack, but the SARs inside one block apply to the
+   running value, so a block's second shift sees the first one's
+   result - reading them as independent fractions of the vector gets
+   every multiple wrong. Element 1 is 2 + 1/4 + 1/8 and not
+   2 + 1/8 + 1/16 for exactly that reason, the 0x44f8 shift acting on
+   the already doubled value.
+
+   THE SHIFTS ARE ARITHMETIC, so a negative component rounds away
+   from zero: -15 >> 2 is -4. Element 13 lands on (191,81) rather
+   than (191,82) because of it.
+
+   THE NEGATIVE MULTIPLE puts element 3 on the far side of the sun
+   from the centre, which is what stops the flare reading as a
+   one-sided smear. ELEMENT 11 IS THE SCREEN CENTRE exactly, being
+   the whole vector.
+
+   ELEMENTS 5 AND 6 SHARE A POSITION - 1000:45ac pushes it and
+   1000:45be takes it back - drawn one after the other in different
+   colours, which is a ring inside a ring. 9 and 10 only share a
+   colour.
+
+   Flare_Render sets g_FlareSize to 0x50 before the sun, but each
+   element recomputes it from its own colour - section 6.1 - so they
+   differ in size as well as in colour and position.
+
+   AN ELEMENT IS A RING, NOT A DISC. Flare_DrawElement draws only
+   where the sprite lies within 0x20 ABOVE the threshold, and the
+   strength is ((0x20 - that) & 0x1f) >> 2 - brightest one step above
+   it and gone 0x1f above. The cone falls off with radius, so that
+   band is an annulus whose bright edge is its outside. Only the sun's
+   own disc is filled.
+
+6.  The additive blit
+
+   This is the demo's ONLY additive write, and it is not a span
+   routine - which is why it is absent from the five g_SpanRoutine
+   values of subsystems/raster.txt.
+
+   Flare_DrawSun at 1000:4754, per pixel:
+
+       al = ES:[si] - g_FlareColour
+       skip the pixel if that borrowed or came out zero
+       ax = (-ax) & 0xff                     0x100 minus the excess
+       dh = ES:[si + 0x4600]                 the ANGLE plane, 6.3
+       di = g_FlickerTable[dh] - ax + 0x40,  floored at 0
+       ax = di + g_FlareRamp[ax]             NOT [di] - see below
+       clamp to 0xff, then >>= 2             0 .. 0x3f
+       ah = [bx]                             THE DESTINATION PIXEL
+       dh = (ah & 0x3f) + al
+       if dh >= 0x40:  dh = 0x3f             SATURATE
+       [bx] = dh | (ah & 0xc0)               restore the band
+
+   THE TOP TWO BITS ARE PRESERVED AND THE LOW SIX ARE ADDED TO. A
+   pixel here is a 6-bit index inside a 64-entry band chosen by its
+   high bits - subsystems/raster.txt section 4 - so the flare
+   brightens whatever it covers without changing that pixel's colour,
+   and saturating at 0x3f is what stops it carrying into the next
+   band and flipping the colour outright.
+
+   g_FlareRamp IS NOT INDEXED BY THE FLICKERED VALUE. 1000:47b0 is an
+   XCHG, so the two swap: the ramp is read at 0x100 - (sprite -
+   colour), the sprite's own height above the threshold, and the
+   flickered index is only the base it is added to. Reading the
+   paraphrase as ramp[di] gives a plausible picture and the wrong
+   pixels.
+
+   THE SHIMMER IS g_FlickerTable, the smoothed random walk
+   Flicker_Step maintains - effects/flicker.txt - indexed through the
+   angle plane of section 6.3.
+
+   Flare_DrawElement at 1000:47f5 does the same thing at 0 to 7
+   instead of 0 to 0x3f, so an element tints by at most an eighth of
+   a band and only the sun's own disc really glares.
+
+   6.1.  One sprite, every size
+
+      Flare_ClipSetup at 1000:49df:
+
+          bp = 0x50 - g_FlareSize
+          si = bp + (bp << 5) + (bp << 7)       ie. bp * 161
+
+      bp*161 is bp*160 + bp - A ROW AND A COLUMN of a 160-wide
+      buffer - so the source starts at (0x50-size, 0x50-size), the
+      centred sub-square of side 2*size inside Flare_BuildSprite's
+      160 x 160 cone.
+
+      THERE IS NO SCALER ANYWHERE. The cone is a linear ramp from its
+      centre, so a tighter crop is a smaller disc that is correctly
+      shaped and brighter at its rim. Flare_DrawElement sets
+      g_FlareSize from its own brightness and gets the right sprite
+      for free.
+
+   6.2.  Looking at the sun washes the screen out
+
+      Sun_GlareFade at 1000:46f3, called before anything is drawn:
+
+          if the sun is off screen:  g_PalFadeTarget2 = 0;  return
+          bx = ((0x104 - g_SunScreenY) >> 1) * 160
+             + (g_SunScreenX >> 1)
+          cl = ES:[bx]
+          g_PalFadeTarget2 = ((0x8200 - g_FlareEnergy) >> 3)
+                             / (0x104 - cl)
+
+      IT WRITES THE GLOBAL FADE TARGET. Tick_Default eases g_PalFade
+      toward it and uploads the palette, so the whole screen bleaches
+      when the sun is high and recovers when the camera looks away.
+      Nothing in the fade path is specific to the sun; only the
+      target is.
+
+      The halved coordinates address the same 160-wide buffer the
+      sprite lives in.
+
+   6.3.  Flare_BuildSprite: the cone, the ramp, the angle plane
+
+      1000:5363, run once in the transition, filling segment 0x7ad2.
+
+      THE CONE, 1000:5378. A 160 x 160 byte image, 251 at the centre
+      falling linearly to 0 at the rim:
+
+          eax = sq[|x-0x50|] + sq[|y-0x50|],  then << 2
+          si  = Math_Sqrt(eax)                A BYTE OFFSET
+          v   = 0xff - si/4 - si/8 - si/64 - si/512, floored at 0
+
+      The square table is the one Math_BuildSquareTable leaves at
+      1000:c8b2 and Math_Sqrt returns the byte offset of the nearest
+      entry, so si is about 8r - the four shifts start at 2 and not at
+      0 for that reason.
+
+      THE RAMP, 1000:53e3. 256 words at g_FlareRamp:
+
+          ax = 0x1194 / (k + 1) - 0x11
+          if |(0x100-k) - 0xb0| < 4:  ax += (4 - that) * 8
+          if ax > 0xff:  AL = 0xff
+
+      THE LAST CLAMP WRITES AL ALONE, so an entry whose quotient
+      passed 0xff keeps its high byte: entry 0 is 0x11ff, entry 1
+      0x08ff. It is invisible because Flare_DrawSun clamps the whole
+      word, but a transcription that clamps here is not the same
+      table. The bump peaks at entry 0x50, 0x46 against its
+      neighbours' 0x3f and 0x3d.
+
+      THE ANGLE PLANE, 1000:541f. 512 wedges from (160,100) out to
+      radius 256, each a 512th of a turn, filled through Poly_Fill
+      with a ONE-BYTE texture - 1000:5446 writes the single texel the
+      zeroed u and v will read, so a textured filler does a flat
+      fill. 1000:54df then copies 160 x 64 from (80,68) to 0x6400.
+
+      SO THE PLANE IS AN ANGLE MAP, and the 0x4600 that Flare_DrawSun
+      adds is exact: the sprite's centre byte 0x3250 plus 0x4600 is
+      0x7850, which is the sweep's centre byte. The flicker table is
+      therefore indexed by ANGLE AROUND THE SUN, and Flicker_Step
+      closes its table into a ring - effects/flicker.txt - precisely
+      because an angle wraps.
+
+      THE VALUE IS THE COUNTER'S LOW BYTE against 512 wedges, so the
+      ramp runs 0 to 255 TWICE around the circle and the shimmer has
+      two-fold symmetry [verified by sampling the demo's own buffer].
+
+      THE SUN'S OWN SPRITE READS OUTSIDE THE PLANE. At size 0x50 it
+      spans all 160 rows while the plane covers only rows 48 to 111,
+      so its top rows index the cone as though it were an angle and
+      its bottom rows read the zeros past 0x8c00.
+
+   6.4.  The shimmer is not frame-deterministic
+
+      Flicker_Step runs from the TICK, which is the timer interrupt,
+      while Flare_DrawSun reads the table from the frame. The two are
+      asynchronous: dumping g_FlickerTable either side of one call to
+      Flare_DrawSun shows 214 of its 256 entries changed [observed].
+
+      SO THE SUN'S DISC IS DRAWN PARTLY WITH ONE TABLE AND PARTLY
+      WITH THE NEXT, and the same frame rendered twice does not come
+      out the same. Any byte comparison of the sun has to say which
+      table state it is against; the elements read no table and are
+      exact.
+
+7.  The port
+
+   Sky_SunAndStars is transcribed - src/lithium/lithium_sky.c - and
+   called where the original calls it, after the geometry, because the
+   back buffer's 0x80 fill is the whole of its visibility test.
+
+   WHAT IS RIGHT: the plot rules, and as it turns out everything
+   else. The plot rules first - A star only lands where the buffer
+   still holds 0x80, its colour is (shade >> 3) + 0x88, and the sun's
+   occlusion reads one clamped byte. The star count on screen is the
+   right order - 99 isolated pixels against the demo's 57 - and the
+   untouched area falls from 64,000 to 51,249 where the demo reaches
+   36,185, the balance being the flare.
+
+   AND SO IS THE PROJECTION. Broken inside Sky_SunAndStars at the
+   three SAR 9 boundaries - 1000:4288, 0x42a1 and 0x42ba - all three
+   rotations agree to the bit [verified]:
+
+       after Y   -603136  -1228800   9347072
+       after X  -4825088  16389968  73525008
+       after Z -116547274 70949286 588197888
+
+   and the divide then gives (110, 130), which is what 1000:8f42 and
+   0x8f44 hold the instant after the store. Given the demo's own
+   angles the transcription reproduces that exactly.
+
+   THE STARS MATCH TOO: fed the same angles, 125 of the 1,024 land on
+   screen, 101 of those on a pixel the demo left in the star range,
+   and 97 with the identical shade [verified]. The rest are positions
+   the demo rejected because terrain covered them.
+
+   TWO WAYS TO MISMEASURE THIS, both of which happened first:
+
+   o g_SunScreenX AND Y ARE OVERWRITTEN BY Flare_Render. Read at the
+     end of the frame they hold (191, 81), which is an element's
+     position and not the sun's. Read them at 1000:4301, right after
+     the store, or not at all.
+
+   o A STAR IS ONE PIXEL, so comparing star POSITIONS between two
+     runs needs the camera angle matched exactly, not to within a
+     tick or two. Two ticks of drift moves every star and the match
+     rate falls to zero while nothing is wrong.
+
+   THE FLARE IS PORTED - src/lithium/lithium_flare.c - and verified
+   against the demo's own memory at four levels [verified]:
+
+   +----------------------------+------------------------------------+
+   | the 0x7ad2 sprite segment  | 40,960 bytes identical - the cone, |
+   |                            | the angle plane built through our  |
+   |                            | own Poly_Fill, and the zeros above |
+   | g_FlareRamp                | 256 of 256 words, AL-clamp         |
+   |                            | artifacts and the 0x50 bump        |
+   | the 13 elements            | 9,350 pixels, NOT ONE DIFFERENT    |
+   | the sun's disc             | 14,105 pixels, 13,807 identical    |
+   +----------------------------+------------------------------------+
+
+   THE SUN'S RESIDUAL IS THE INTERRUPT, not the arithmetic - section
+   6.4. Against the table as it stood BEFORE the call, rows 50 to 117
+   are exact and it diverges below; against the table AFTER, rows 118
+   down are exact. The 20 rows between were drawn while Flicker_Step
+   was part way through rewriting the table.
+
+   THE FLARE DOES NOT YET APPEAR IN OUR OWN RUN. The sun never
+   reaches the screen in the first 900 ticks of the flyover because
+   the camera diverges from the demo's before it turns that way -
+   ./flight.txt. Nothing about the flare is waiting on that; it is
+   the camera.
+
+8.  Open questions
+
+   o What maybe_Sky_DrawPoint's point was meant to be. The addresses
+     cs:[0x88f5] and cs:[0x892d] are g_SlotPosX and g_SlotPosZ at
+     slot 0xc, one of the bolt slots, and it is rotated by only TWO
+     camera angles - no pitch - which nothing else in the demo does.
+     Section 1 is why it does not matter: the gate is never set.
+
+   o The two further callers of Flare_ClipSetup, at 1000:48d4 and
+     1000:4974, are Blob_DrawKeepBand and Blob_DrawBurn, the trail's
+     blitters - effects/trail.txt section 4.

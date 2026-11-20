@@ -1,0 +1,648 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                       LITHIUM: THE RASTERISER
+
+
+Abstract
+
+   What turns the two scene pools into pixels. Four stages: project
+   the vertices, cull and sort the faces, fill the polygons into an
+   off-screen buffer, blit the dirty rectangle out.
+
+   EVERY POLYGON IS TEXTURE-MAPPED FROM A 256x256 MAP, one whole
+   segment, addressed as (v << 8) | u. There is no flat-fill path.
+   The chrome, the gold, the cyan and the purple are all the SAME
+   sphere map read into different stretches of the palette.
+
+   mesh3d.txt is the geometry side and this is its other half.
+   Everything is [verified] from the routines unless marked.
+
+Table of Contents
+
+   1. The four stages
+   2. Scene_ProjectVerts
+   3. Scene_DrawFaces
+   4. Poly_Fill and the five span routines
+      4.1. Poly_SpanScreen, and the stride of 320
+      4.2. Poly_ClearSpans, and what the table starts as
+   5. Screen_Present
+   6. The dirty rectangle
+      6.4. The span buffer and its double life
+   7. The vertex record, start to finish
+   8. The segment map
+   9. Open questions
+
+1.  The four stages
+
+       Scene_ProjectVerts  1000:2e48   camera, perspective, screen
+       Scene_DrawFaces     1000:31ca   clip, backface, depth, sort,
+                                       then one Poly_Fill per face
+       Poly_Fill           1000:38a3   edges, spans, the dirty box
+       Screen_Present      1000:34d1   0x4ad2 -> 0xa000, dirty box only
+
+   Helpers: Clip_CountOutside at 1000:5fda, Sort_ByDepth at
+   1000:3e30, and 1000:4107 which returns a depth for the focus easing.
+
+   CLIP_COUNTOUTSIDE DOES NOT CLIP [verified]. It never modifies a
+   coordinate - it tallies, one counter per screen edge, into the four
+   bytes of g_ClipCodes:
+
+       ax <  0      the left byte      dx <  0     the top
+       ax >= 0x140  the right          dx >= 0xc8  the bottom
+
+   THE SEED IS WHAT MAKES IT ONE COMPARE. Scene_DrawFaces writes
+   0x01010101 at img 0x31fb, calls it for all three vertices, and at
+   img 0x325a tests the dword against 0xfcfcfcfc - the low two bits of
+   each byte masked away. A counter reaches 4 only when ALL THREE
+   vertices lay outside that same edge, so a trivial reject that would
+   be three tests is one.
+
+   SORT_BYDEPTH SORTS DESCENDING [verified] - a Hoare-partition
+   quicksort whose pivot is the last element. img 0x3e40 advances
+   while [SI] >= pivot and img 0x3e4b retreats while [DI] <= pivot,
+   so the large keys gather at the low end. The key is a face's
+   summed z, so the list comes out FARTHEST FIRST: painter order,
+   back to front. Both compares are UNSIGNED and the key is a word.
+
+   IT IS A SPEED STAGE AND NOTHING ELSE. It can only remove faces,
+   and the faces it removes were entirely off an edge: implementing it
+   in the port changed not one pixel of the opening.
+
+   NOTHING DRAWS STRAIGHT TO 0xa000. Poly_Fill writes into segment
+   0x4ad2, the 64 KB buffer Demo_Main pre-fills with 0x80 at
+   1000:016b, and only Screen_Present touches video memory.
+
+2.  Scene_ProjectVerts
+
+   Returns immediately if either pool is empty. Per 16-byte vertex
+   record in segment 0x2ad2:
+
+   o STASH FIRST. [+0x0c] = x and [+0x0e] = z are written before
+     anything else happens, so they keep the PRE-CAMERA position.
+     Section 3.3 is what needs them.
+   o Add g_CamPosX, g_SlotPosY, g_CamPosZ.
+   o Rotate Y, then X, then Z by g_SlotAngleY, g_SlotAngleX,
+     g_SlotAngleZ, each followed by SAR 0xa. THE ORDER IS Y, X, Z
+     WHERE Mesh_Transform USES Z, X, Y - the object transform and the
+     camera transform are not the same sequence.
+   o Clamp z up to 0x7d. That is the near plane, and it is a clamp
+     rather than a reject, so a vertex behind the camera is dragged
+     to the plane instead of removed.
+   o Store z as a DWORD at [+0x00], over the x and y words.
+   o Project:
+
+         screen x = ((x << 8) / z) + 0xa0
+         screen y = ((y << 8) / z) + 0x64
+
+     so THE FOCAL LENGTH IS 256, and 0xa0, 0x64 is the centre of a
+     320x200 screen. Both are clamped to +/- 0x800 before the centre
+     is added, which is a guard band about six screens wide.
+
+   o THE DIVIDEND IS 64-BIT. 1000:2ef1 builds EDX:EAX with SHL EAX,
+     8 and SAR EDX, 0x18, so the shift cannot lose the top eight
+     bits of the coordinate. Shatter_Draw at 1000:2b6b and the sky
+     at 1000:42cf form it the same way.
+
+     A 32-BIT SHIFT IS NOT A SIMPLIFICATION OF IT. The sign flips
+     once a coordinate passes 2^23, and the effect is not a small
+     error: an object that has travelled far enough off screen to be
+     clipped away comes back ONTO it, projected to a sliver one or
+     two pixels wide and the full height of the frame. The shatter
+     reaches that depth about 170 ticks in, when the shards have
+     fallen around 16,000 units below the screen.
+
+   2.1.  The depth fade, which is fog for free
+
+      The last thing it does per vertex:
+
+          d = (z - 0x28000) >> 7
+          if d >= 0x100:
+              u = ((u << 0xf) / d) >> 7
+              v = ((v << 0xf) / d) >> 7
+
+      The factor is 256/d, so it is 1.0 at the threshold and shrinks
+      with distance. Past z = 0x30000 the ENVIRONMENT-MAP COORDINATES
+      ARE PULLED TOWARD ZERO in proportion to distance.
+
+      That is not a fade to a fog colour - it walks a distant surface
+      into the (0,0) corner of the sphere map, and THE TEXTURE
+      GENERATOR KEEPS THAT CORNER DARK ON PURPOSE. Tex_Plot drops any
+      dot where x + y < 0x46, so the corner never gets drawn into -
+      texture.txt section 3.
+
+      DARK, NOT BLACK. Generating the map measures that triangle at a
+      mean of 3.1 against 23.4 over the whole map, with isolated
+      values up to 49 along its hypotenuse, because the eight blur
+      passes bleed light back across the diagonal. So distance fog
+      here costs two divides and no blending, and it fades toward a
+      dark value rather than to zero.
+
+      It also means the fade is a property of the MAP, so a scene that
+      wants no fog only has to use a map with a bright corner.
+
+3.  Scene_DrawFaces
+
+   3.1.  Pass one: reject and collect
+
+      Per 8-byte face record in segment 0x8ad2:
+
+      o g_ClipCodes = 0x01010101, then maybe_Clip_Point is called on
+        each of the three screen positions and accumulates into it.
+        TEST g_ClipCodes, 0xfcfcfcfc rejects the face if any byte rose
+        above 1, so the codes are ONE BYTE PER VERTEX packed into a
+        dword, and values 0 and 1 are acceptable while 2 and up are
+        not.
+      o ebp accumulates the three vertices z.
+      o BACKFACE, by the 2D cross product taken about vertex 2:
+
+            keep if (x0-x2)*(y1-y2) - (y0-y2)*(x1-x2) >= 0
+
+      o DEPTH, rejecting unless g_DepthNear < ebp <= 0xd9a80. The near
+        bound is a variable and the far bound is baked in.
+      o A survivor appends a 4-BYTE PAIR at g_SortListPtr, which
+        starts at 0xc000 in segment 0x2ad2: the key ebp >> 8, then the
+        face record offset.
+
+      So the sort list shares the segment with the vertex pool, at a
+      fixed 0xc000, which caps the pool at 0xc000/0x10 = 3,072
+      vertices [inferred].
+
+   3.2.  The sort, and the focus
+
+      maybe_Sort_ByDepth at 1000:3e30 takes the list bounds in SI and
+      DI and sorts in place. Then 1000:4107 returns a depth which
+      g_FocusEased follows by the shift-and-add idiom that runs all
+      through this corpus:
+
+          g_FocusEased += (target - g_FocusEased) >> 3
+
+      Nothing yet read says what consumes g_FocusEased.
+
+   3.3.  Pass two: draw
+
+      Per entry of the sorted list:
+
+      o GS = the face attribute word, AND IT IS A TEXTURE SEGMENT.
+        Two values are special:
+
+            0     GS = 0x6ad2, g_SpanRoutine = Poly_SpanBand40
+            1     GS = 0x6ad2, g_SpanRoutine = Poly_SpanBandC0
+            else  GS = the attribute, the plain routine stands
+
+        THE BAND DOES NOT CARRY BETWEEN FACES. 1000:3366 stores the
+        plain routine and IS the loop's back edge - 1000:34cc jumps
+        to it - so every face starts from plain and only 0 and 1
+        override. Reading it as sticky predicts that everything
+        drawn after the tower changes colour, and it does not.
+
+      o The three screen positions and the three u,v pairs are written
+        into g_PolyArgs at CS:0xe1b2 - INSIDE THE CODE SEGMENT. The
+        rasteriser takes its arguments from patched memory, so the
+        bytes Ghidra shows at 0xe1b2 are not the bytes a frame uses.
+      o CALL Poly_Fill.
+
+      THEN AN OPTIONAL SECOND PASS, when maybe_g_PlanarPassOn is 1 and
+      the texture segment was 0x5ad2. For each of the three vertices
+      it rebuilds u,v from the STASHED pre-camera x and z:
+
+          u = (x - g_PlanarOrgX - 1) >> 3
+          v = (z - g_PlanarOrgZ - 1) >> 3
+          rotate about Y by maybe_g_PlanarAngle, then SAR 0xc
+          u += 0x40, v += 0x40, and reject the whole face unless both
+          are inside 0..0x7f
+
+      then GS = 0x7ad2, g_SpanRoutine = Poly_SpanPlanar, and Poly_Fill
+      again.
+
+      IT IS THE CRAFT'S SHADOW [verified]. The map at 0x7ad2:0x8c00 is
+      128 x 128 and holds a 17 x 17 SILHOUETTE OF THE SHIP - swept
+      wings tapering to a tail - every lit byte of it 0x14, and
+      Poly_SpanPlanar SUBTRACTS that from the pixel it lands on:
+
+          bl = GS:[(v >> 9 and 0xff80) + u's integer part + 0x8c00]
+          ES:[di] -= bl
+          if that went negative:  ES:[di] = 0x81
+
+      0x14 is exactly the step a shadowed pixel shows - 0xad becomes
+      0x99 - and 0x81 is the floor, which is also the terrain
+      texture's commonest value.
+
+      BECAUSE THE MAPPING IS WORLD-SPACE THE SHADOW CONFORMS TO THE
+      GROUND. u and v come from the vertex's stashed pre-camera x and
+      z, so the silhouette lies on the surface and bends with it
+      rather than sitting flat on the screen.
+
+      Tex_RenderObjectTile AT 1000:5526 PAINTS IT, once, before the
+      scene [verified]:
+
+          clear the back buffer
+          g_SlotAngleX[4] = 0x800    a quarter turn - straight down
+          g_PolyArgs v    = 0x80     constant, so every fill is FLAT
+          Poly_Fill with the plain span, through the sphere map
+          copy 128 x 128 from (96,36) of the back buffer to
+              0x7ad2:0x8c00
+
+      SO THE SILHOUETTE IS THE SHIP ITSELF, SEEN FROM ABOVE, and its
+      uniform 0x14 is one sphere-map texel rather than shading: the v
+      the fill is handed never varies, so each face comes out flat.
+      It is the same render-then-copy-a-window idiom
+      Flare_BuildSprite uses for its angle plane - ../effects/sky.txt
+      6.3 - and it shares that routine's segment.
+
+      THE SILHOUETTE IS STATIC. Watched for 63 frames, not one byte of
+      it is written during the scene [verified], and what moves is the
+      PROJECTION. g_PlanarOrgX and Z are set once a frame at
+      1000:335a from the camera's own position, so the decal is
+      centred on THE CAMERA and not on the craft; it reads as the
+      craft's shadow only because the chase camera holds a nearly
+      fixed offset behind it - ../effects/flight.txt section 6.2.
+
+      g_FocusEased EASES ONCE PER FRAME, at 1000:32fe, and that makes
+      it the one piece of the shadow a port cannot simply transcribe.
+      It is the ONE quantity in the flyover that still disagrees;
+      everything the flight model owns is bit-exact,
+      ../effects/flyover.txt section 4.1.
+
+      HOW MANY TICKS A FRAME TAKES IS A PROPERTY OF THE MACHINE, and
+      it is measured by watching the two writes against each other -
+      g_FocusEased at 1000:32fe once per frame, g_CreditTick at
+      1000:63fb once per tick. The tick clock itself does not move
+      with the machine: 47 ticks span 58 display frames, 57 against
+      70 Hz, at any speed.
+
+      Measured at two fixed points, the scene's start and the heavier
+      state the shadow work used, so the pair is comparable across
+      settings [verified]:
+
+      +----------------+-------------+-------------+
+      | DOSBox cycles  | start       | heavy       |
+      +================+=============+=============+
+      | 35,000         | 0.31        | 0.25        |
+      | ~90,000        | 0.81        | 0.63        |
+      | ~126,000       | 1.13        | 0.89        |
+      +----------------+-------------+-------------+
+
+      IT IS LINEAR IN CYCLES, to within one per cent across those
+      three, so the rate a setting will give is
+
+          frames per tick = cycles / 112,000     light
+                          = cycles / 142,000     heavy
+
+      and one frame per tick needs 112,000 at the scene's start and
+      142,000 where the draw costs most. Below that the demo
+      computes motion for ticks it never shows.
+
+      THE SETTING IS NOT READABLE, ONLY MEASURABLE. Neither
+      dosbox.conf nor what the debugger reports follows a cycles
+      changed from the GUI or with Ctrl+F12: a reported 35,000 has
+      measured 0.81, three times that. The two writes are the only
+      honest source.
+
+      SO THE PORT EASES ONCE PER TICK AND INVENTS NOTHING. A host
+      frame is one tick, the ease runs once per frame as the original
+      does, and on a machine quick enough to draw every tick the two
+      agree. What is left is the distance between the machine's rate
+      and one, and it changes sign across it:
+
+      +----------------+------------------+----------------+
+      | DOSBox cycles  | g_FocusEased     | the origin     |
+      +================+==================+================+
+      | ~90,000        | +634, -488       | 45 to 54       |
+      | ~126,000       | +5, -113, -184   | 1 to 7         |
+      +----------------+------------------+----------------+
+
+      A setting that STRADDLES one frame a tick is therefore the
+      closest a flat once-per-tick ease can get, since the original's
+      own rate moves with the scene's load [verified].
+
+      A CONSTANT DIVIDER FITS ONE MACHINE ONLY. A gate of every
+      second tick is 0.5 frames a tick, near the 0.31 of a
+      35,000-cycle machine and less than half the 1.13 of a
+      120,000-cycle one; it leaves the origin 13 to 49 units out at
+      the speed the ease runs once per tick to within 1 to 7
+      [verified]. A per-frame accumulator is simulation state, so
+      what remains is the fraction above one frame a tick that a
+      quicker machine draws, and closing that would mean reproducing
+      a particular CPU's draw cost.
+
+      ITS CONSUMER IS THE SHADOW ORIGIN, and only that: 1000:32f1
+      takes the craft's height above the eased ground as
+      (g_SlotHomeY - g_FocusEased) >> 4 and shifts the origin by that
+      and half of it. 1000:4107 is Terrain_HeightAtSlot, which
+      returns the ground under a slot's FLOWN position - section 3.3
+      and ../effects/flight.txt 6.1.
+
+      g_PlanarOrgX AND Z CARRY A FRAME OF STALENESS. They are written
+      once a frame while the tick clock keeps running, so a snapshot
+      holds them against positions newer than the ones they were
+      built from - up to four ticks of it on a 35,000-cycle machine
+      and under one at 120,000, which is most of why the origin's
+      error falls with the frame rate as well.
+
+      THE PORT DRAWS IT - src/lithium/lithium_shadow.c. The stencil
+      comes out byte for byte: 150 lit bytes of 16,384, the same rows
+      58 to 74 and columns 55 to 71, all 0x14 [verified against the
+      demo's own map]. On screen the two agree to three pixels - 1,560
+      shadowed against 1,557 at a matched tick, with the same
+      darkening - and they differ in position only by the camera
+      drift.
+
+      ONE THING THE PAINTER INHERITS RATHER THAN SETS: nothing in
+      Tex_RenderObjectTile touches g_ObjAxisSwap, so it still holds
+      the 1 the opening left. Without it the silhouette comes out the
+      craft's 120 by 60 PLAN instead of its 120 by 124 outline - 18
+      lit bytes instead of 150, an outline rather than a shape.
+
+      1000:342e ENABLES IT FROM A FLAG NOTHING IN THE SCENE WRITES.
+      maybe_g_PlanarPassOn is 1 IN THE IMAGE, and only
+      maybe_Scene_Battle clears it, so searching for a writer in the
+      flyover finds none and concludes wrongly that the pass is off.
+      It is the same trap as g_CreditPtr - ../effects/text.txt 7.2.
+
+4.  Poly_Fill and the five span routines
+
+   Arguments come from g_PolyArgs, not from registers:
+
+       CS:0xe1b2  x0   0xe1b4  y0     0xe1c6  u0   0xe1d6  v0
+       CS:0xe1b6  x1   0xe1b8  y1     0xe1ca  u1   0xe1da  v1
+       CS:0xe1ba  x2   0xe1bc  y2     0xe1ce  u2   0xe1de  v2
+       CS:0xe1be  x3   0xe1c0  y3     0xe1d2  u3   0xe1e2  v3
+
+   Poly_Fill fills the fourth slot itself by copying vertex 0, which
+   closes the polygon so the edge walk needs no wrap test.
+
+   It then tracks g_DirtyMinX, g_DirtyMaxX, g_DirtyMinRow and
+   g_DirtyMaxRow across the vertices, which is the box Screen_Present
+   blits, and draws into ES = 0x4ad2.
+
+   The inner loop is reached through g_SpanRoutine, patched per face.
+   Four of the five variants share one texel fetch:
+
+       ebx = eax                 u, 16.16 fixed point
+       rol edx, 0x10             v, integer part down into dl
+       rol ebx, 0x10             u, integer part down into bl
+       eax += ebp                step u by du
+       bh = dl                   bx = (v << 8) | u
+       bl = gs:[bx]              the texel
+       es:[di] = bl              the pixel
+
+   SO THE TEXTURE IS 256x256 AND FILLS A WHOLE SEGMENT. Wrapping is
+   free: u and v are bytes, so they wrap without a mask.
+
+   +---------------------+----------+-----------------------------------+
+   | Poly_SpanTextured   | 1000:3bd8| the texel as it is                |
+   | Poly_SpanBand40     | 1000:3c70| texel + 0x40                      |
+   | Poly_SpanBandC0     | 1000:3c96| texel + 0xc0                      |
+   | Poly_SpanPlanar     | 1000:3c18| a 128x128 map: bx = (v >> 9) and  |
+   |                     |          | 0xff80, plus u, fetched at        |
+   |                     |          | gs:[bx - 0x7400]                  |
+   | Poly_SpanScreen     | 1000:3c46| a 320-stride screen - 4.1 below   |
+   +---------------------+----------+-----------------------------------+
+
+   IT IS AFFINE PER SCANLINE, AND THE GRADIENT IS RECOMPUTED EVERY ROW
+   [verified]. A span record is 32 bytes - the stride is y << 5 - and
+   Poly_Fill reads six fields out of it at img 0x3b52:
+
+       +0x00  x left      +0x04  u left (16.16)   +0x0c  v left
+       +0x02  x right     +0x08  u right          +0x10  v right
+
+   Poly_ScanEdges writes ONLY the two x values, at img 0x3d32 and
+   0x3d3c. The u and v pairs are filled by Poly_Fill's own two edge
+   walks at img 0x3952 and 0x3a57, which carry them down each edge at
+   (delta << 16) / dy. The row loop then divides across the span:
+
+       cx = x_right - x_left + 1          inclusive, img 0x3b7a
+       ebp = (u_right - u_left) / cx      du per pixel, img 0x3b7d
+       esi = (v_right - v_left) / cx      dv per pixel, img 0x3b8d
+
+   So there is no perspective correction anywhere and no single
+   polygon-wide gradient either: each row gets its own pair from one
+   IDIV apiece, which is why a face can be wide without shearing.
+
+   THE BAND VARIANTS ARE HOW ONE MAP BECOMES MANY COLOURS. Attribute 0
+   and attribute 1 read the SAME texture at segment 0x6ad2 and add
+   0x40 or 0xc0 to the result, which moves it into a different
+   64-entry stretch of the palette. So the gold ships, the cyan
+   surface and the purple tower can be one sphere map and three
+   palette ramps - effects/scenes.txt scene 9, and it is why there is
+   only one Pal_Upload.
+
+   This also says what the palette must look like: FOUR 64-ENTRY
+   RAMPS, since the offsets are 0x00, 0x40 and 0xc0 and a texel is a
+   byte that must not run past its ramp.
+
+4.1.  Poly_SpanScreen, and the stride of 320
+
+   1000:3c46, the one the shatter points g_SpanRoutine at and the
+   only variant whose texture is a SCREEN rather than a 256 x 256
+   map - effects/shatter.txt section 5.
+
+   THE INDEX IS u + v * 320. 1000:3c59 shifts v left 6 and 1000:3c5e
+   shifts that same DX left 2 more and adds again, which is v * 64
+   plus v * 256. The arithmetic is 16-bit throughout and the two
+   partial sums agree with v * 320 modulo 65,536, so the truncation
+   costs nothing.
+
+   NOTHING MASKS u OR v HERE, because at this stride a wrap would
+   read the wrong row. Shatter_Draw clamps them to 0x13f and 0xc7
+   before the fill, at 1000:2bb0 and 1000:2bcb.
+
+   THE STEP COMES FIRST, which no other variant does. 1000:3c46 and
+   1000:3c49 add du and dv at the top of the loop and the fetch is at
+   1000:3c65, so a span's first pixel samples one step in;
+   Poly_SpanTextured copies u and v into the index registers before
+   it adds. Sampling before the step disagrees with the original on
+   about a third of the pixels it writes [verified].
+
+4.2.  Poly_ClearSpans, and what the table starts as
+
+   1000:3d64, called first thing by Poly_Fill. It resets only the
+   rows the LAST polygon touched, which is why g_SpanRowMin at
+   1000:8edc and g_SpanRowMax at 1000:8ede are kept, and it then
+   resets the pair to 0x18e0 and 0 so the next walk can grow it.
+
+   THE BOUNDS ARE BYTE OFFSETS, NOT ROW NUMBERS. 1000:3d82 does SAR 5
+   and INC to turn the range into a count, and the clamp at 1000:3d69
+   is 0x18e0 = 199 * 32. Terrain_Build reads the same pair with the
+   same idiom at 1000:4c1b.
+
+   THE IMAGE CARRIES 0 AND 0x18e0, so the first call ever made clears
+   all 200 rows. The records themselves are BSS. A reimplementation
+   that starts the bounds at 0 instead leaves every row no polygon
+   has yet reached holding x left = 0, and the first polygon to reach
+   one fills from the left edge of the screen.
+
+   THE INITIAL RECORD IS THE DWORD 0xffff0140 at 1000:3d8e: x left =
+   320, off the right edge, and x right = -1, off the left. Every
+   later compare then works without a per-row touched flag.
+
+5.  Screen_Present
+
+   ES = 0xa000, DS = 0x4ad2. Scene_DrawFaces jumps straight here when
+   a pool is empty, so it runs whether or not anything was drawn.
+
+   The box is widened by one in each direction and clamped:
+
+       g_DirtyMinX    down one, floored at 0
+       g_DirtyMaxX    up one, capped at 0x13f, which is 319
+       g_DirtyMinRow  floored at 0
+       g_DirtyMaxRow  capped at 0x18e0, which is 199 * 320
+
+   SO THE ROW BOUNDS ARE BYTE OFFSETS, NOT ROW NUMBERS - 0x18e0 is the
+   start of the last row of a 320-wide buffer. Only that rectangle is
+   copied, which is why the buffer is pre-filled with 0x80 once rather
+   than cleared per frame: a frame that touches little copies little.
+
+6.  The dirty rectangle
+
+   THE DEMO NEVER BLITS A WHOLE SCREEN. Two routines bracket every
+   scene's frame and only the changed region reaches 0xa000.
+
+   6.1.  Dirty_Reset
+
+      1000:318a, at the top of the frame. It opens the box INVERTED:
+
+          g_DirtyMaxX   = 0
+          g_DirtyMinX   = 0x13f
+          g_DirtyMaxRow = 0
+          g_DirtyMinRow = 0x18e0
+          g_DirtyLast*  = g_DirtyKept*
+
+      Starting max at zero and min at the far edge lets every drawing
+      routine grow the box with a bare compare and no "is it empty"
+      flag: if nothing draws, max stays below min and the presenter
+      returns.
+
+      THE ROW BOUNDS ARE IN UNITS OF 32, not pixels - 0x18e0 >> 5 is
+      199. Everything that grows them shifts its row left by five
+      first, which is why Text_DrawStringAt writes 0x18e0 and
+      maybe_Sky_DrawPoint shifts its y by 5 before comparing.
+
+   6.2.  Screen_PresentDirty
+
+      1000:34d1, the last call in almost every scene loop.
+
+          ES = 0xa000, DS = 0x4ad2
+          grow the box by one each way, clamped
+          g_DirtyKept* = the grown box
+          UNION it with g_DirtyLast*
+          return if max <= min on either axis
+          rows >>= 5;  width and height each floored at 5
+          di = x + row*320
+          width rounded UP to a multiple of 4
+          bp = 0x140 - width
+          REP MOVSD per row
+
+      UNIONING WITH THE PREVIOUS FRAME'S BOX IS WHAT STOPS TRAILS.
+      The back buffer is not cleared between frames, so wherever the
+      last frame drew has to be repainted even when nothing touches
+      it now.
+
+      ROUNDING THE WIDTH UP TO FOUR lets the inner loop be REP MOVSD
+      with no tail, and the five-pixel floor stops a one-pixel change
+      costing more in setup than it saves.
+
+   6.3.  Who grows it
+
+      Every routine that puts pixels in the back buffer: the flare
+      blitters and Flare_ClipSetup - effects/sky.txt - Trail_Draw,
+      maybe_Sky_DrawPoint, and Text_DrawStringAt.
+
+   6.4.  The span buffer and its double life
+
+      Poly_ScanEdges at 1000:3cbc turns a polygon's edges into a MIN
+      and MAX x per scanline, which is what Poly_Fill then walks.
+
+          Poly_ClearSpans
+          close the polygon: g_PolyArgs[4,5] = g_PolyArgs[0,1]
+          per edge, skipping any with y0 == y1:
+              swap the ends if y0 > y1
+              eax = ((x1 - x0) << 8) / (y1 - y0)      THE SLOPE, 8.8
+              bp = (y0 << 5) + 0xc8b2
+              ebx = (x0 << 8) + eax/2
+              per scanline:
+                  di = ebx >> 8
+                  cs:[bp]   = min(cs:[bp], di)
+                  cs:[bp+2] = max(cs:[bp+2], di)
+                  ebx += eax;  bp += 0x20
+
+      ONE DIVIDE PER EDGE AND AN ADD PER SCANLINE. Adding half a step
+      before the first row rounds to the pixel centre, which stops
+      the two edges of a thin polygon disagreeing by one.
+
+      Poly_ClearSpans at 1000:3d64 resets ONLY the rows the last
+      polygon used, writing 0xffff0140 per row - min x 0x140 and max
+      x -1, inverted sentinels, the same trick Dirty_Reset uses.
+
+      THE SPAN BUFFER IS g_SquareTable. Both are 0x1900 bytes at
+      0xc8b2: 200 scanlines of 0x20, or 1600 squares of four. They
+      cannot coexist, and that is why Math_BuildSquareTable is called
+      TWICE in the main script, at 1000:0232 and 1000:02c0 - each
+      call sits immediately before a batch of texture generation, and
+      any polygon drawn in between has destroyed the squares.
+      subsystems/texture.txt section 6.1.
+
+      The row range in use is g_SpanRowMin and g_SpanRowMax, which
+      Terrain_Build also reads to size its strip grid -
+      ../effects/terrain.txt section 1. One pair of words serves the
+      rasteriser and the terrain both; 4.2 above is where they are
+      written and what the image starts them at.
+
+7.  The vertex record, start to finish
+
+   One 16-byte record is written by three different stages, and it is
+   REUSED RATHER THAN COPIED, so the same offset means different
+   things depending on when you look.
+
+   +--------+----------------------+----------------------------------+
+   | Offset | After Mesh_Transform | After Scene_ProjectVerts         |
+   +========+======================+==================================+
+   | +0x00  | x, word              | z, DWORD - overwrites x and y    |
+   | +0x02  | y, word              | (the rest of that dword)         |
+   | +0x04  | z, word              | screen x, word                   |
+   | +0x06  | unused               | screen y, word                   |
+   | +0x08  | env-map u            | u, faded by distance             |
+   | +0x0a  | env-map v            | v, faded by distance             |
+   | +0x0c  | unused               | the pre-camera x                 |
+   | +0x0e  | unused               | the pre-camera z                 |
+   +--------+----------------------+----------------------------------+
+
+   Reading the record without knowing which stage has run is the way
+   to misread this whole subsystem.
+
+8.  The segment map
+
+   Everything in the pipeline lives at segment X*0x1000 + 0xad2, which
+   is not a coincidence - they are 64 KB apart starting from 0x2ad2.
+
+   +----------+--------------------------------------------------------+
+   | 0x2ad2   | the vertex pool, and the sort list at 0xc000           |
+   | 0x4ad2   | THE OFF-SCREEN BUFFER Poly_Fill draws into             |
+   | 0x5ad2   | a texture segment; the one that triggers the planar    |
+   |          | second pass                                            |
+   | 0x6ad2   | the texture attributes 0 and 1 use, with the palette   |
+   |          | band added                                             |
+   | 0x7ad2   | the 128x128 planar map                                 |
+   | 0x8ad2   | the face pool, the mixer buffer and the volume table   |
+   +----------+--------------------------------------------------------+
+
+   0x3ad2 is missing from the list and nothing read so far uses it.
+
+9.  Open questions
+
+   o WHAT FILLS 0x7ad2 AS A PLANAR MAP, in the parts that read it
+     that way. In the opening it is something else entirely: the
+     accumulator Screen_CrossFade keeps, which the runner clears at
+     img 0x150b - ../effects/rockintro.txt section 1.
+
+
+   o Mem_ClearSegment at 1000:2aa1 takes a segment in AX and zeroes
+     all 64 KB of it. Demo_Main passes 0xa000 and 1000:150b passes
+     0x7ad2, so it is a general clear and NOT a second blit, however
+     much the 0xa000 calls look like one.
+
+   o The scene runners clear the pools themselves, in one instruction:
+     MOV dword ptr CS:[0x88af], 0 covers g_VertPoolCount at 0x88af and
+     g_FacePoolCount at 0x88b1 together. 1000:150b and 1000:5526 both
+     do it. g_SortListPtr is reset by Scene_DrawFaces on entry.

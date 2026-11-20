@@ -1,0 +1,101 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                      UKKO: THE MUSIC DRIVER
+
+
+Abstract
+
+   A linked-in sound driver, far-called with a function number in
+   AX. It is not demo code and is bounded here rather than read
+   through. All [verified] from the depacked listing.
+
+   FUNCTION 4 IS A MIXER TOP-UP AND NEVER BLOCKS, which rules it out
+   as the demo's frame pacer - ./timeline.txt section 2.
+
+Table of Contents
+
+   1. Entry and dispatch
+   2. The functions
+   3. Function 4
+   4. Open questions
+
+1.  Entry and dispatch
+
+   The demo far-calls 6000:f133, which is a trampoline:
+
+       PUSH 0x6d6f;  PUSH 0x1a4a;  RETF
+
+   RETF pops IP then CS, so it jumps to 6d6f:1a4a - the very next
+   byte. THAT IS THE POINT: it normalises CS to 0x6d6f so every
+   CS-relative access inside the driver resolves, whatever segment
+   the caller used.
+
+   Music_Dispatch then selects on AL:
+
+       if al > 0xa:  RETF
+       si = (ax & 0xff) * 2
+       jmp CS:[si + g_MusicFnTable]
+
+2.  The functions
+
+   g_MusicFnTable at 6d6f:1546, eleven words:
+
+   +------+--------------+---------------------------------------+
+   | AX   | Target       | What the demo uses it for             |
+   +======+==============+=======================================+
+   | 0    | 6d6f:1a5e    | a bare RETF                           |
+   | 1    | Music_Init   | AH = card, BH = IRQ, DX = base port   |
+   | 2    | 6d6f:1c5e    | called once at startup                |
+   | 3    | Music_Stop   | called on the way out                 |
+   | 4    | Music_Poll   | once a frame, section 3               |
+   | 5    | 6d6f:1a5e    | a bare RETF                           |
+   | 6    | 6d6f:1a5e    | a bare RETF                           |
+   | 7    | Music_LoadModule | DX = the staged module segment    |
+   | 8    | 6d6f:1d5b    | unused by the demo                    |
+   | 9    | 6d6f:1dc7    | unused by the demo                    |
+   | 10   | 6d6f:1e1f    | unused by the demo                    |
+   +------+--------------+---------------------------------------+
+
+   Startup calls 1, 7 and 2 in that order - ./startup.txt section 5.
+
+3.  Function 4
+
+   Music_Poll, 6d6f:1ce3.
+
+       if g_SndCardSel == 1:  RETF
+       if g_SndCardSel >= 3:  ax = CS:[0xac0]
+       else:
+           read the DMA channel 1 count from port 2, TWICE,
+           subtract g_DmaBase from each, keep the SMALLER
+       ax &= 0xfffc;  ax &= 0xffe
+       if ax == g_MixWritePos:  return
+       g_MixWritePos = ax
+       forward:  Music_MixInto(ax - old)
+       wrapped:  mix to 0x1000, then from 0
+
+   IT NEVER BLOCKS. Every path either returns at once or mixes a
+   bounded number of samples and returns. There is no spin, no tick
+   wait and no retrace.
+
+   READING THE COUNT TWICE AND KEEPING THE SMALLER guards the
+   8237's latch. The two byte reads are not atomic, so a count that
+   appears to have moved BACKWARDS is the one that did not straddle
+   an update.
+
+   CARD 1 RETURNS IMMEDIATELY because the Gravis mixes on the card.
+   The software mixer exists for the Sound Blaster family.
+
+4.  Open questions
+
+   o What functions 2, 8, 9 and 10 do. Only 2 is called by the
+     demo, once, and nothing has been read.
+
+   o Whether Music_Init installs a timer interrupt. If it does, the
+     module's own tempo is kept there and not in anything the demo
+     calls - which would explain how the music keeps time while the
+     demo loop is free-running.
+
+   o Which tracker the driver came from. The dispatch shape and the
+     eleven-function table are conventional for the period but no
+     string in the blob names it.

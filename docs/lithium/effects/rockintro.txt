@@ -1,0 +1,408 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                       LITHIUM: THE OPENING
+
+
+Abstract
+
+   The demo's first runner, maybe_Scene_RockIntro at 1000:150b. It is
+   the first scene Demo_Main calls, at img 0x01fe, and it runs until
+   the module reaches order position 4.
+
+   ONE RUNNER PRODUCES ALL THREE OF THE OPENING'S APPARENT SCENES -
+   the warping chrome surface, the rock that moves in, and the VISTA
+   logo. There is no dispatcher between them and no second runner.
+
+   THE WARPING SURFACE AND THE ROCK ARE THE SAME MESH AT TWO SCALES.
+   0x41ea is loaded into both slots; the difference is one shift.
+
+   All [verified] from the runner, Tick_RockIntro and Image_BlitScaled.
+
+Table of Contents
+
+   1. The runner
+   2. One mesh, two sizes
+   3. Tick_RockIntro
+   4. The spinning reflection
+      4.1. Tick_RockIntro2
+   5. The logo
+   6. The three object flags
+   7. The opening fade-up out of black
+      7.1. Its duration is set by the frame rate, not the tick rate
+   8. How the part ends
+   9. Open questions
+
+1.  The runner
+
+   1000:150b, 0x1ca bytes. Setup, then a loop from img 0x1635.
+
+       Mem_ClearSegment(0x7ad2)
+       Image_UnpackRle                   a 320x200 picture into 0x5ad2
+       blur 0x5ad2 TWICE                 1000:4b15 with CX = 2
+       g_PalRampShift = 1
+       g_TickHandler = 0x6294            Tick_RockIntro
+       g_SlotPosZ[8] = 0x6590;  g_SlotPosZ[4] = 0x1b58
+       g_LogoZoom = 0x2200
+       g_BlitCentreX, g_BlitCentreY = 0xa0, 0x64
+       g_BlitSrcW, g_BlitSrcH = 0x50000, 0x32000
+       g_DepthNear = 0x186a
+
+   per frame, from img 0x1635:
+
+       g_VertPoolCount = 0
+       mesh 0x41ea, g_ObjScaleShift = 0xe, g_ObjMirror = 1
+       Obj_Select(4);  g_ObjFaceAttr = 0x6ad2;  Mesh_Transform
+       if -0x1f4 < g_SlotPosZ[8] < 0x2cec:
+           mesh 0x41ea, g_ObjScaleShift = 0x10, g_ObjMirror = 0
+           Obj_Select(8);  g_ObjFaceAttr = 0x6ad2;  Mesh_Transform
+       Scene_ProjectVerts;  Scene_DrawFacesReset
+       Image_BlitScaled                  the logo
+       Screen_CrossFade
+       Demo_PollKeys
+   until g_MusicPos >= 4 or g_PalFade >= 0xff60
+
+   NOTHING THE RUNNER DRAWS REACHES THE SCREEN DIRECTLY. Both the
+   geometry and the title go into 0x4ad2, and Screen_CrossFade at img
+   0x185a moves a THIRD buffer a quarter of the way toward it:
+
+       blend = blend + ((back - blend) >> 2)
+
+   writing each result to 0x7ad2 and to 0xa000 together. So the
+   picture is a running average of the last several frames, which is
+   where the demo's smeared, liquid look comes from - and it is why
+   the runner clears 0x7ad2 at img 0x150b. That segment is the
+   cross-fade accumulator here, not the planar map it is elsewhere.
+
+   THE SHIFT IS SIGNED AND THE APPROACH IS NOT SYMMETRIC: a gap of
+   -1 to -3 still steps down by one where +1 to +3 steps by nothing,
+   so a pixel falls to its target but can stall just short of it on
+   the way up.
+
+2.  One mesh, two sizes
+
+   Both slots load 0x41ea, the 130-vertex 256-face model of
+   ../formats/mesh.txt section 4, under the sphere map at 0x6ad2.
+   They differ in one byte:
+
+   +--------+------------------+-------------+----------------------+
+   | Slot   | g_ObjScaleShift  | g_ObjMirror | reads as             |
+   +========+==================+=============+======================+
+   | 4      | 0xe              | 1           | a warping surface    |
+   | 8      | 0x10             | 0           | a rock               |
+   +--------+------------------+-------------+----------------------+
+
+   IT IS LITERALLY ONE MODEL TWICE, confirmed in the running demo:
+   with both copies up, g_VertPoolCount reads 260 and
+   g_FacePoolCount 512 - exactly double the rock's 130 and 256, with
+   no second model anywhere in the pool.
+
+   THE SMALLER SHIFT IS THE LARGER OBJECT. At 0xe the mesh is four
+   times the size it is at 0x10, far enough past the near plane that
+   only a patch of its curvature is on screen - so what the viewer
+   reads as a warping chrome surface is the same rock, too close to
+   be recognised as one.
+
+   THE Z FUDGE IS A SCENE TERM AND IT IS NOT NEUTRAL HERE. img 0x4e44
+   reads g_SlotPosZ[0] - a FIXED address, element 0, not the slot
+   being drawn - and applies (-(v + 1)) >> 0xc << 8. The opening runs
+   with that element at 0, so EVERY VERTEX MOVES 256 UNITS CLOSER.
+   Reading it at 1000:4e33 and 0x4e44 against the running demo is
+   what settled it: with the offset left out the port covered 84.5
+   per cent of the screen where the demo covers 100, and the surface
+   read as a recognisable rock instead of a wall of curvature.
+
+   SLOT 8 IS DEPTH-GATED, NOT TIMED. img 0x166c skips it entirely
+   unless its Z lies between -0x1f4 and 0x2cec. The Z starts at
+   0x6590 and Tick_RockIntro drops it 0x20 a tick, so the second
+   copy appears when it comes near and is dropped once it passes.
+
+3.  Tick_RockIntro
+
+   1000:6294, installed at img 0x153a.
+
+       g_SlotAngle{X,Y,Z}[4] += 0x10, 0x0c, 0x0a
+       g_SlotPosZ[8]         -= 0x20
+       g_SlotAngle{X,Y,Z}[8] += 0x05, 0x07, 0x0d
+       bx = (g_SlotPosZ[8] >> 1) + 0x200, & 0x1ffc
+       g_SlotPosY[8] = (g_SinTable[bx] >> 1) - 0x48
+       g_EnvMapAngle += 0x10
+       g_LogoZoom    -= 8
+       if g_LogoZoom < 0x1900:  g_BlitPhase += 0xa
+       Pal_Animate;  Pal_Upload
+       if g_LogoZoom < 0:
+           g_BlitSrcOfs = 0xa0;  g_BlitPhase = 0xff00
+           g_LogoZoom = -0x200;  g_TickHandler = 0x6337
+
+   SIX RATES FOR TWO OBJECTS, none shared, so the two copies tumble
+   on unrelated schedules and never look like one thing twice.
+
+   THE SMALL ONE BOBS BECAUSE ITS HEIGHT IS A FUNCTION OF ITS DEPTH.
+   g_SlotPosY[8] is a sine lookup indexed by its own Z, so the rock
+   rises and falls as it closes rather than on a clock of its own.
+
+   IT HANDS OFF RATHER THAN ENDING, AND THE HANDOFF IS THE WHOLE
+   VISTA-TO-LITHIUM TRANSITION. Once the zoom passes zero, img 0x6315
+   moves g_BlitSrcOfs to 0xa0 - the OTHER HALF of the one picture -
+   and restarts the zoom at -0x200, behind the camera. Nothing else
+   changes: no second image is loaded and no scene ends.
+
+   SO THE SECOND WORD RETRACES THE FIRST ONE'S PATH BACKWARDS. The
+   first grows toward the viewer and passes behind the camera; the
+   second starts behind it, swells into view and recedes.
+
+4.1.  Tick_RockIntro2
+
+   1000:6337, 0x67 bytes, installed by that handoff.
+
+   THE ROCKS DO NOT NOTICE IT. All six angle rates are the ones phase
+   one uses, g_SlotPosZ[8] still falls 0x20 a tick, g_SlotPosY[8] is
+   still the sine of its own depth, and g_EnvMapAngle still gains
+   0x10. Only the logo moves differently.
+
+       g_LogoZoom += (0x800 - g_LogoZoom) >> 9      img 0x6368
+       g_BlitPhase += 9
+       Pal_Animate;  Pal_Upload
+       if g_MusicPos >= 6:  g_PalFadeTarget2 = 0xff00
+
+   AN EASE OUTWARD WHERE PHASE ONE WAS A WALK INWARD. Closing a
+   512th of the gap to 0x800 each tick is slow at first, so the word
+   stays behind the camera for about 128 ticks before the zoom turns
+   positive, then arrives enormous and shrinks away.
+
+4.  The spinning reflection
+
+   g_EnvMapAngle at 1000:8f76 gains 0x10 every tick, and this is the
+   only place in the demo that writes it per frame.
+
+   THAT IS WHY THE CHROME LOOKS WRONG. Mesh_Transform rotates each
+   per-vertex normal into view space and biases it by 0x80 to index
+   the sphere map - ../subsystems/mesh3d.txt section 5. Adding a
+   constant to that angle every tick turns the REFLECTION on its own,
+   independently of the geometry, so highlights crawl across a
+   surface that is not turning that way. A correct environment map is
+   fixed in world space and only the object moves; this one does
+   both, which reads as a material that is alive.
+
+5.  The logo
+
+   Image_BlitScaled at 1000:16d5 draws the picture at 0x5ad2 into
+   0x4ad2, scaled by g_LogoZoom about g_BlitCentreX, g_BlitCentreY.
+
+   THE PICTURE IS THE TITLE CARD, "Vista Lithium" in a tall script
+   hand, white on black across rows 13 to 176 [verified]. It is RLE
+   in the image at img 0x1930f - 0x1e5f:0xad1f, the asset segment -
+   and 4,646 source bytes expand to exactly 64,000. Each source byte
+   is one run: bit 7 is the value, 0 or 0x7f, and bits 0 to 6 are the
+   length less one. Image_UnpackRle at 1000:2d10.
+
+   THE BLUR IS Image_Blur AND NOT Tex_Blur, and the two are a trap
+   for each other. They sit side by side at img 0x4aee and 0x4b15 and
+   are identical but for their vertical offsets: Tex_Blur reaches
+   +-0x100 because a texture is 256 wide, Image_Blur +-0x140 because
+   a picture is 320. Smoothing the title with the texture one pulls
+   every row 64 bytes out of line and the letterforms come out
+   mangled - legible as a shape, not as writing.
+
+   IT IS TWO-LEVEL AND THEN BLURRED TWICE, which is what turns the
+   hard stencil into the soft grey letterforms the blit actually
+   scales. The runner is the only one that blurs 0x5ad2 - the blur at
+   1000:4b15 runs with CX = 2 at img 0x151c. Read live, row 100 of
+   the blurred buffer rises to 0x7c through a gradient, against the
+   flat 0x7f it started as.
+
+   ONE PICTURE HOLDS BOTH WORDS AND THE BLIT TAKES HALF OF IT
+   [verified]. The u accumulator steps by the zoom and is shifted
+   >> 0xb, while v is shifted >> 0xa - so with g_BlitSrcW at 320 << 10
+   the source columns run 0 to 160, HALF the picture's width, where
+   the rows run the full 200. g_BlitSrcOfs at img 0x8fd4 is 0 through
+   the opening, which takes the left half: "Vista". Read off the
+   running demo, the screen shows that word alone.
+
+   SO SCENES 3 AND 4 ARE THE SAME BLIT TWICE. The picture decodes to
+   "Vista Lithium" across its full width - section 5 - and moving
+   g_BlitSrcOfs to 160 takes the right half instead, which is the
+   LITHIUM of scenes.txt 2.4. One image, two halves, one routine.
+
+   IT IS AN ADDITIVE BLEND, NOT A COPY: img 0x1839 adds the source
+   byte into the destination and img 0x183e saturates at 0x7f, which
+   is why the word appears THROUGH the chrome rather than over it. A
+   source byte of 0 is skipped outright at img 0x1833.
+
+   THE FADE IS A SINE OF g_BlitPhase. img 0x17d9 reads the table at
+   img 0xa8b2 and makes (sin - 0x1000) >> 7 + 0x7f, clamped at zero,
+   which it SUBTRACTS from every source byte - so the whole word
+   breathes in and out rather than any pixel being keyed.
+
+   g_LogoZoom FALLS 8 A TICK from 0x2200, so the logo grows toward
+   the viewer throughout; it crosses 0x1900 at tick 288, which is
+   where g_BlitPhase at 1000:8f9f starts advancing 0xa a tick, and
+   when it passes zero at tick 1088 the handoff in section 3 fires.
+
+   THE FADE IS A COSINE AND THAT IS WHAT HOLDS THE WORD BACK. img
+   0x17e2 reads the table at 0xa8b2 where its base is 0xa0b2, and
+   0x800 is 512 dwords - a quarter turn - so the term is cos, not
+   sin. At phase 0 cos is 0x1000, the fade is a full 0x7f, and every
+   source byte goes to zero: THE WORD IS INVISIBLE UNTIL THE PHASE
+   MOVES, and the phase does not move until the zoom crosses 0x1900
+   at tick 288.
+
+       tick   zoom    w x h   fade   the word
+          0   8704    37x23    127   invisible
+        288   6400    51x32    127   invisible, and now starting
+        438   5200    63x39    108   19 of 127
+        588   4000    81x51     73   54
+        688   3200   102x64     63   brightest, 64
+        888   1600   204x128    91   36, and much larger
+       1088      0      -      126   1, at the handoff
+
+   So it rises once, peaks around tick 688, and dims as it swells
+   past the camera - and because the rock enters its depth gate at
+   tick 453 the two arrive together. On the sine the word would
+   instead be half lit from the first frame and gone by the time the
+   rock appeared [verified; the whole back buffer is byte-identical
+   to the demo's at tick 91, where the word contributes nothing].
+
+   The period is 8192 phase units - 819 ticks - not the 2048 the
+   index suggests, because the mask is g_BlitPhase & 0x1ffc. Phase 1
+   gives it 800, just under one turn, so there is exactly one arc.
+
+6.  The three object flags
+
+   Two of them are rewritten per slot inside the loop at 1000:1635 -
+   g_ObjScaleShift and g_ObjMirror - and THE THIRD IS SET ONCE IN THE
+   RUNNER'S HEAD at 1000:1606, so g_ObjAxisSwap holds for both slots
+   and for the whole part [verified; read live as 1 at slot 0].
+
+6.1.  g_ObjAxisSwap
+
+       XCHG CL,BL   then   NEG BL          BL is y, CL is z
+
+   The exchange leaves y holding the old z and the negate lands on
+   that, so it is y = -z, z = y - a quarter turn about x. The other
+   sense is the easy mistake and it is not visibly broken: it moves
+   the environment-map highlight from the middle of the screen to the
+   top. Bytes on the position pass at 1000:4d9f, words on the normal
+   pass at 1000:4e82, so the negate's width differs.
+
+6.2.  g_ObjMirror does two unrelated things
+
+   o  1000:4ef3 negates both env-map components, reflecting the
+      sphere-map lookup.
+
+   o  1000:4f51 does XCHG AX,CX in the FACE loop, where those hold
+      the first and third VERTEX INDICES - it reverses the winding
+      order.
+
+   Reversed winding is what keeps a reflected model facing outward,
+   so it decides which faces survive the cull rather than how they
+   are shaded. The flag therefore changes BOTH the lookup and the
+   geometry, by two different mechanisms [verified].
+
+7.  The opening fade-up out of black
+
+   THE DEMO OPENS BLACK AND THE CHROME ARRIVES IN THE TOP RIGHT, and
+   IT IS A PALETTE FADE. g_PalFade enters the runner at its stored
+   0xff00 - minus 256 - and Tick_Default walks it to 0 at one a tick,
+   so the part spends its first 256 ticks, four and a half seconds,
+   fading up out of black [verified; -240 at tick 13 and -52 at tick
+   201 on a fresh run, which is 188 over 188].
+
+   THE INDEX BUFFER IS NOT BLACK WHILE THIS HAPPENS. At tick 13 all
+   64,000 of the demo's bytes are non-zero and average 23.7 - the
+   geometry is drawn and the chrome is there. What is black is the
+   DAC: a fade of -240 biases every entry by -60, and a palette whose
+   entries only reach 0x3f clamps nearly all of them to zero. Compare
+   indices against indices and palettes against palettes here, never
+   the resolved picture.
+
+   WHY THE FADE HAS NOT ALREADY RUN by the time the scene starts,
+   given the interrupt was installed long before: Demo_TickIsr tests
+   g_MixRateShift at 1000:6282 and jumps straight to the tail while
+   it is zero, past the replayer AND the tick handler AND the fade.
+   1000:708f sets it, three ticks before the runner. So nothing in
+   the tick chain runs during Demo_Main's setup at all, and the fade
+   is still full when the opening begins [verified].
+
+   Screen_CrossFade adds a second, much shorter ramp on top of it,
+   starting from the blend buffer that 1000:150e clears. The blend
+   moves a QUARTER of the way toward the rendered frame each pass:
+
+       passes   1     3     5     8    11    16
+       reached  25%   58%   76%   90%  96%   99%
+
+   and because it is a proportional step the BRIGHTEST region crosses
+   into visibility first. At tick 91 the back buffer's top-right
+   eighth means 52.8 against 13 to 24 everywhere else [verified], so
+   the chrome appears there and spreads - which is what it looks like.
+
+7.1.  Its duration is set by the frame rate, not the tick rate
+
+   The blend takes its quarter step once per RENDERED FRAME, and the
+   original renders as fast as the machine manages while its motion
+   runs on the 57 Hz interrupt. Measured in the emulator, consecutive
+   frames are 4, 3 and 3 ticks apart - about 17 frames a second
+   [observed; g_EnvMapAngle read at 1000:16b9 on successive passes].
+
+   So the blend's own ramp takes about 0.65 s to reach 96 per cent
+   where blending once per tick reaches it in 0.19 s. THE TIME
+   CONSTANT OF THE BLEND IS A PROPERTY OF THE 1997 MACHINE and no
+   constant in the image gives it - unlike the palette fade above,
+   which is simply the stored 0xff00 and needs nothing measured.
+
+   The port therefore renders the back buffer every tick - so it can
+   be diffed against the emulator at any tick - and lets the blend
+   consume every third one, which is the same sequence of inputs the
+   original blends. Measured mid-fade at tick 202 that is worth a
+   mean error of 1.97 against 4.32 for blending every tick. It cannot
+   go to zero: the real cadence varies frame by frame with how much
+   of the screen the geometry covers, and a fixed three cannot follow
+   it.
+
+8.  How the part ends
+
+   NEITHER TEST ENDS IT ALONE. The runner loops at 1000:16bf and
+   1000:16c9 while
+
+       g_MusicPos < 4      OR      g_PalFade >= 0xff60
+
+   so it leaves only once the module has reached order 4 AND the fade
+   has gone past -160. Each on its own is satisfied far too early: the
+   order arrives 1156 ticks in, less than half way, and the fade test
+   is true from the first tick because g_PalFade sits at 0 until
+   something arms it [verified].
+
+   What arms it is the music. Tick_RockIntro2 at 1000:638a writes
+   0xff00 into g_PalFadeTarget2 once g_MusicPos >= 6, and
+   Tick_Default's walk - which is linear at one a tick for this gap,
+   subsystems/music.txt section 5 - then takes 161 ticks to
+   carry g_PalFade across 0xff60. So:
+
+       tick    4   order 1       order boundaries every 384 ticks
+       tick 1088   the handoff   g_LogoZoom reaches 0, section 3
+       tick 1924   order 6       g_PalFadeTarget2 = 0xff00
+       tick 2085   the exit      g_PalFade = -161
+
+   and the opening is 2,085 ticks, 36.6 s at 57 Hz [verified;
+   g_EnvMapAngle read at the exit, which only this scene's handlers
+   advance].
+
+   THE SCREEN IS NOT FULLY BLACK AT THE CUT. -161 >> 2 is a bias of
+   -41 against a 6-bit DAC, so a palette entry of 0x3f still reaches
+   22 and the brightest pixels are a quarter lit when the runner
+   returns. The next scene carries the fade the rest of the way.
+
+   THE 380 TICKS BEFORE THE SCENE ARE NOT A CONSTANT. Order 1 lands
+   on tick 4 rather than 384, so the module was already 380 ticks
+   into order 0 when the runner started - that is Demo_Main's sphere
+   map build, and on a faster machine it is shorter and the opening
+   is correspondingly LONGER [observed; DOSBox].
+
+9.  Open questions
+
+   o THE PICTURE IS NOT THE TERRAIN HEIGHTMAP, which was worth
+     ruling out because both live in the asset segment. The relief
+     is GENERATED - Terrain_DiamondSquare into 0x4ad2 and copied to
+     0x1e5f:0000, 128 x 128 - and the picture sits at 0xad1f, past
+     the end of it. terrain.txt section 5.
+

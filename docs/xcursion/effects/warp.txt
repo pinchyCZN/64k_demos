@@ -1,0 +1,152 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                     EXCURSION: THE PLASMA WARP
+
+
+Abstract
+
+   Warp_RenderFull at 1000:287b, runner Warp_RunFull at 1000:2639,
+   animated by mode 6 at img 0x10b8. The part is img 0x03ee, sync
+   0x12 - the scene that follows the second rotozoom.
+
+   THE WHITE PULSES ARE A NOTE, NOT A TIMER. The module sequencer
+   raises a flag whenever instrument 0x10 is triggered, and mode 6
+   reads it; on a hit the fade level jumps and four of the warp's
+   offsets halve. So the picture snaps brighter AND tighter on the
+   beat, out of the music rather than alongside it.
+
+Table of Contents
+
+   1. The part
+   2. The renderer
+   3. Mode 6, and the pulse
+   4. The palette
+   5. Open questions
+
+1.  The part
+
+   img 0x03ee, in order [verified]:
+
+       Vga_ClearScreen                            img 0x03ee
+       Pal_BuildBluePurple                        img 0x03f1
+       g_FadeLevel = 0xc000, Pal_Fade             img 0x03f4
+       g_AnimMode = 6                             img 0x03fe
+       g_PlasmaRough = 1, bias 0x400, mask 0x7ff  img 0x0409
+       Plasma_Generate                            img 0x041d
+       Buf_ClampMin1                              img 0x0420
+       g_MusicPosTarget = 0x12                    img 0x0423
+       Warp_RunFull                               img 0x042a
+
+   IT OPENS AT THE FADE'S FLOOR. 0xc000 is -16384, which Pal_Fade
+   turns into a bias of -64 and so a black screen; mode 6 then eases
+   the level up to its target. The scene rises out of black rather
+   than cutting in.
+
+   It builds its OWN field - roughness 1 against the opening's 3, so
+   a smoother cloud than the landscape's - into the same 0x2a79 the
+   rotozoom was just using.
+
+   THE FIELD IS NOT REPRODUCIBLE FROM ITS PARAMETERS ALONE. It is the
+   fourth draw on a random stream nothing re-seeds, so it comes out
+   right only when the three calls before it have taken their share -
+   effects/script1_landscape.txt section 6.1 gives the order and the
+   counts. With the parameters right and the stream wrong the result
+   is a plasma of the same character and entirely different values,
+   which reads on screen as the colour cycle breaking up: saturated
+   regions land on the palette's dark end and show as black cores
+   inside the bright veins.
+
+   Buf_ClampMin1 then lifts every zero byte in the field to 1.
+   Pal_Cycle rotates entries 1..255 and leaves entry 0 alone, so a
+   pixel carrying 0 would be pinned to one colour while everything
+   around it moved - a static speckle through the veins. The zeros are
+   there to be lifted because Plasma_Displace clamps below at 0 and
+   the coarse octaves saturate.
+
+2.  The renderer
+
+   img 0x287b, and it works in 2x2 BLOCKS: 160 by 100 of them, one
+   source word copied to two screen rows, so the field is read at
+   half resolution in both axes.
+
+   img 0x287b packs the six animated offsets into three words first,
+   taking the HIGH byte of each - offsets 0 and 3 into one word, 1
+   and 4 the next, 2 and 5 the last. Then per block [verified]:
+
+       bx = (field[d7 + si] >> 3)
+          + ((field[d9 + si] AND 0xf8) << 5)
+          + si
+          + db
+
+   so two samples of the field give a displacement, si carries the
+   destination, and the third word is a constant offset.
+
+   THE FIELD IS BOTH THE DISPLACEMENT AND THE PICTURE - the bytes
+   copied from bx are the same plasma that chose bx. It folds over
+   itself rather than warping some separate image, which is where
+   the veined look comes from.
+
+   THE TAIL CHECK AT img 0x28dd IS NOT A CLIP. It takes a
+   byte-at-a-time path only when the source is within two bytes of
+   the segment end, so reading a word cannot wrap. Both paths draw;
+   no block is skipped.
+
+3.  Mode 6, and the pulse
+
+   img 0x10b8. Six offsets at img 0x98dd..0x98e8, each integrating
+   its own sine from its own phase at img 0x98e9..0x98f4, and the
+   phases advance by 2, 3, 4, 5, 6 and 7 a tick - six incommensurate
+   rates, which is why the warp never repeats.
+
+       offset[k] += sin(phase[k]) >> 3
+       phase[k]  += 2 + k
+
+   Then the pulse, img 0x1170 [verified]:
+
+       if the instrument flag is set:
+           clear it
+           offsets 0, 1, 3 and 4 are HALVED
+           g_FadeLevel = target + 0x2000
+
+   The flag is img 0xa88d, and the sequencer raises it at img 0x0d08
+   on instrument 0x10 - see effects/camera.txt section 3 for the row
+   decoder it sits in. Measured: the instrument is absent from the
+   part's first two patterns and then fires 18 times a pattern
+   [observed], so the scene fades in quietly and only then starts
+   pulsing.
+
+   Between pulses the level eases toward the target by 0x100 a tick,
+   img 0x11c9, never overshooting - so each hit is a sharp rise and
+   a slow decay. img 0x11a3 walks the target itself down once the
+   order passes 0x11 and the row counter 0x30, which ends the part
+   on a darkening.
+
+   img 0x1199 calls Pal_Cycle every tick, so the colours rotate
+   underneath all of this independently of the pulse.
+
+4.  The palette
+
+   Pal_BuildBluePurple at img 0x3cac - six bands that return to
+   where they began, so Pal_Cycle can rotate it with no seam:
+
+       0.. 63   (0, 0, n)              black to blue
+      64.. 95   (2n, 0, 0x3f)          blue to magenta
+      96..127   (0x3f, 2n, 0x3f)       magenta to white
+     128..159   (0x3f, 0x3f-2n, 0x3f)  white back to magenta
+     160..191   (0x3f-2n, 0, 0x3f)     magenta back to blue
+     192..255   (0, 0, 0x3f-n)         blue to black
+
+   Pal_Cycle is img 0x3ac5 and rotates entries 1..255 down by one,
+   wrapping entry 1 round to 255. ENTRY 0 IS LEFT ALONE - img 0x3ad8
+   starts the move at entry 1 - so the darkest level stays put while
+   everything above it cycles.
+
+5.  Open questions
+
+   o g_FadeTarget at img 0x991f is 0 statically and no part in this
+     chain writes it before mode 6 reads it, so the pulse height is
+     measured from zero. Whether a later part sets it is untraced.
+
+   o What follows sync 0x12. img 0x042d sets mode 7 and runs img
+     0x2818 to sync 0x14; neither is read.

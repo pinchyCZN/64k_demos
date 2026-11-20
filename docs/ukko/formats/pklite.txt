@@ -1,0 +1,146 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                   UKKO: THE PKLITE CONTAINER
+
+
+Abstract
+
+   UKKO.EXE is packed with PKLITE 1.15. The other three demos share an
+   LZEXE derivative and none of this applies to them - ../../
+   layout.txt section 7.
+
+   The decompressor is in the clear, 0x246 bytes at image offset
+   0x44, and is transcribed in src/pklite.c. All [verified]: the C
+   produces 483,083 bytes byte for byte identical to what the
+   binary's own decompressor produces under emulation.
+
+Table of Contents
+
+   1. The container
+   2. The bitstream
+   3. Lengths
+   4. Offsets
+   5. The end, and the relocation pass
+   6. Open questions
+
+1.  The container
+
+   +------------------+---------------------------------------+
+   | marker           | "PKLITE" at file 0x1e, version 0x210f |
+   | header           | 10 paragraphs, 160 bytes              |
+   | stub             | image 0x00, the memory check          |
+   | decompressor     | image 0x44 .. 0x289, 0x246 bytes      |
+   | compressed data  | image 0x290                           |
+   +------------------+---------------------------------------+
+
+   THE DECOMPRESSOR RELOCATES ITSELF before running. The stub moves
+   0x123 words to a segment it computes as required_paragraphs +
+   load_seg - 0x45 - 0x86e0 here - and far-jumps into the copy. So an
+   address in the running code is THE IMAGE OFFSET MINUS 0x44, and
+   its CS-relative tables are at image offset plus 0x44. Getting that
+   direction backwards puts every table 0x88 bytes out.
+
+   THE STREAM OFFSET IS MEASURED, NOT DERIVED. src/pklite.c carries
+   0x290 as a constant. The preamble at image 0x44 to 0x7f computes
+   the source from the image size and relocates the payload upward
+   before decoding, so deriving the offset means emulating that
+   arithmetic; for this one file the value is verified.
+
+2.  The bitstream
+
+   16-bit little-endian words pulled with LODSW, consumed LSB first:
+
+       SHR BP, 1          the bit falls into CF
+       DEC DX             DL counts down from 0x10
+       JZ  refill         a stub does LODSW and jumps back
+       JNC literal        a clear bit is a literal byte
+
+   THE REFILL IS EAGER AND THAT IS LOAD-BEARING. The bit is consumed
+   and the buffer reloaded AT ONCE when the count reaches zero, not
+   lazily on the next read. LODSW and the LODSB that fetches an
+   offset's low byte share SI, so a lazy refill swaps two stream
+   bytes - the output stays correct for a few hundred bytes and then
+   a length comes out wrong.
+
+   LITERALS AND THE BITSTREAM SHARE ONE POINTER. A clear bit means
+   the next byte at SI is copied out verbatim.
+
+3.  Lengths
+
+   A prefix code read a bit at a time, compared against thresholds
+   rather than decoded from a table of code lengths. Two bits name
+   lengths 2 and 3 outright; longer codes index a table at running
+   0x209, which is image 0x24d:
+
+       bits  test                        result
+       2     >= 2                        the value IS the length
+       3     == 0                        table[0] = 4
+       4     < 5                         table[2..4] = 5, 6, 7
+       5     <= 0xc                      table[10..12] = 8, 9, 10
+       5     >  0xc                      the second class, below
+
+   THE TABLES ARE CONTIGUOUS. Running 0x209, 0x214 and 0x21f are
+   three bases into one array, so what looks like a run of zeros in
+   the first table is the start of the second.
+
+   The second class masks to two bits and reads one or two more, then
+   indexes 0x214. Its entry 4 is 0x19, which is an ESCAPE: a literal
+   byte follows and the length is 0x19 plus it. The third class, at
+   running 0x1e9, does the same against 0x21f.
+
+4.  Offsets
+
+   The low byte is ALWAYS a literal LODSB. The high byte is zero for
+   a length-2 match or when the first offset bit is set; otherwise a
+   prefix code picks it:
+
+       bits  test                        high byte
+       3     < 2                         table[0..1] = 1, 2
+       4     < 8                         table[4..7] = 3..6
+       5     < 0x17                      table[16..22] = 7..13
+       6     -                           (code AND 0xdf) outright
+
+   The table is at running 0x22f, image 0x273. The widest codes drop
+   the table entirely: AND BX,0xdf clears bit 5 and XCHG BH,BL makes
+   the code the high byte, which reaches 0x1fff.
+
+   THE COPY IS BYTE AT A TIME - REP MOVSB with the source inside the
+   destination - so a short offset replicates its own output. The
+   whole 496-byte "PINO!" field at the head of the image is five
+   literals and two matches at offset five.
+
+5.  The end, and the relocation pass
+
+   The escape byte ends the stream as well as extending a length:
+
+       0xff   STOP
+       0xfe   normalise ES:DI and DS:SI across a 64 KB boundary and
+              carry on - no match is emitted
+
+   Linear addresses are preserved across the 0xfe normalise, so a
+   flat output buffer has nothing to do for it.
+
+   DECOMPRESSION PRODUCES 483,083 BYTES and then PKLITE applies a
+   RELOCATION LIST, patching segment values into the image. That
+   changes 32 bytes [verified by diffing the two states under
+   emulation], and reverse/unpacked/ukko.bin is the state AFTER it.
+
+   THE PORT DOES NOT APPLY IT. Every one of the 32 lands in code -
+   image 0x1f0 to 0x302, 0xe7d7 to 0xf493, and 0x5f135. The pose
+   data, all four backdrops, all three logo planes and the module are
+   untouched [verified by range check]. reverse/unpacked/
+   ukko_preloc.bin is the pre-relocation state and is what
+   src/pklite.c is tested against.
+
+6.  Open questions
+
+   o Deriving the stream offset rather than measuring it, section 1.
+
+   o Whether the second and third length classes are reachable in
+     this file. The third was exercised during bring-up; no count has
+     been kept.
+
+   o What the relocation list's own format is. It was identified as
+     the cause of a 32-byte difference and then bounded, not read -
+     the code begins at image 0x20f.

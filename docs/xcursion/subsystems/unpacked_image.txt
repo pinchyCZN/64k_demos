@@ -1,0 +1,398 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                    THE DEPACKED XCURSION IMAGE
+
+
+Abstract
+
+   XCURSION_U.EXE in the Ghidra project is XCURSION.EXE depacked:
+   108,432 bytes, 100 functions, based at segment 0x1000. This is the
+   program the mission is about. The packed original holds three
+   functions and none of them are the demo.
+
+   The demo is "EXCURSION" by Vista Software, written for Abduction
+   '96. It opens with a text-mode setup menu, then runs the intro in
+   VGA mode 13h as ONE LINEAR TIMELINE chained across three functions
+   by tail jumps, in which each part is one renderer looping until the
+   music reaches a position.
+
+   What is here is the map: how to regenerate the image, how its
+   addresses work, where the effects are, and what has not been read
+   yet. The opening scene script is read; see
+   effects/script1_landscape.txt. No effect is yet matched to anything
+   visible on screen.
+
+Table of Contents
+
+   1. Regenerating it
+   2. Addressing, and why it cannot be rebased
+   3. The memory map
+   4. Demo_Entry: the timeline
+   5. The effect map
+   6. What the demo shows
+   7. Strings, and what they tell us
+   8. Open questions
+
+1.  Regenerating it
+
+   The image is derived from a binary we do not redistribute, so the
+   bytes are not committed - the depacker is. Both outputs come from
+   one command:
+
+    py -3.10 tools/unpack/xcur_unpack.py \
+        -o reverse/unpacked/xcursion.bin \
+        --exe reverse/unpacked/XCURSION_U.EXE
+
+   The .bin is the flat memory image. The .EXE is the same bytes under
+   a rebuilt MZ header carrying the recovered CS:IP and SS:SP, and it
+   is the one to import: Ghidra's MZ loader then derives the
+   segmentation and the entry point itself instead of us asserting a
+   base and a processor at import time.
+
+   `reverse/unpacked/xcursion.json` IS committed. It is the handful of
+   recovered header fields, and it is what says which load segment a
+   regenerated dump must use.
+
+   How the depack works, and the three checks that say it is correct:
+   ../../formats/packer.txt section 6.
+
+2.  Addressing, and why it cannot be rebased
+
+   Ghidra bases the image at 0x1000, so img X of the depacked image is
+   1000:X for X below 0x10000 and Ghidra spells higher offsets against
+   a later segment - 2000:0a78f is the end of CODE_0.
+
+   THE ORIGINAL RELOCATIONS WERE APPLIED DURING THE DEPACK. Segment
+   immediates in this image are baked for a load segment of 0x1000 and
+   cannot be adjusted - `mov dx, 0x1cd2` at the entry was `mov dx,
+   0x0cd2` in the compressed stream. 0x1000 was chosen because it is
+   Ghidra's own MZ base, which is what makes those immediates read as
+   addresses in the listing rather than as arbitrary numbers.
+
+   A dump taken at a different base disassembles identically and has
+   different, equally baked, constants. So a segment constant quoted
+   out of this image is only meaningful together with the base.
+
+   The packed original's addresses are unrelated to these, and the two
+   are not relatable by any constant offset. CLAUDE.md rule 3: name the
+   image whenever quoting an address.
+
+3.  The memory map
+
+   Ghidra's blocks, and what is in them [verified]:
+
+       CODE_0   1000:0000 - 2000:a78f    108,432 bytes
+       DATA     2000:a790 - a000:159f    the BSS the header asks for
+       HEADER   HEADER::0 - 1f           the rebuilt MZ header
+
+   Inside CODE_0, by what the code treats as what [inferred from the
+   segment registers the entry installs and the extent of the
+   functions]:
+
+       img 0x00000 - 0x0569b    code
+       img 0x0569c - 0x07f5d    constants and tables; unexamined
+       img 0x07f5e - 0x0875d    g_SinTable, 256 x 8 bytes
+       img 0x0875e - 0x09367    unexamined
+       img 0x09368 - 0x0a888    THE VARIABLE BLOCK, addressed cs:
+       img 0x0a455 - 0x0a8ff    the menu and credit strings
+       img 0x0cd20 - ...        the stack segment, SS = 0x1cd2
+       img 0x0d041 - ...        tracker module sample names
+       img 0x1a78a              the last non-zero byte
+
+   EVERY PERSISTENT VARIABLE IS ADDRESSED cs:, NOT ds: [verified]. The
+   entry sets DS = SS = 0x1cd2, but DS is then reloaded constantly as a
+   roving pointer to the working buffers, so 0x1cd2 is the stack segment
+   and nothing else. The variables live in one block at img 0x9368
+   -0xa888 inside the code segment, which is why Ghidra's DAT_1000_*
+   labels for them are right rather than off by a segment.
+
+   Six 64 KB working buffers sit above the image, in the BSS the header
+   asks for, and the code loads their segments as literals [verified]:
+
+       0x2a79   source images and colour data. Also the first segment
+                past the end of the image, at linear 0x2a790
+       0x4a79   a second image buffer
+       0x5a79   a 320x200 offscreen frame buffer
+       0x6a79   THE GENERAL SCRATCH BUFFER - at least eight uses.
+                These are SEGMENT VALUES. Segment 0x6a79 is linear
+                0x6a790, nothing to do with image offset 0x6a79, and a
+                label put at 1000:6a79 lands in the model data. Uses:
+                a radial distance table, a horizon map, a plasma,
+                transformed mesh vertices, Scroller_Render's stencil
+                source, Countdown_Render's particle array,
+                FireText_Render's mask, and Poly_FillFlat's target -
+                which maybe_RadialFan_Build uses to lay a full-screen
+                256-wedge colour fan into it
+       0x7a79   a mesh vertex buffer, among other things
+       0x8a79   g_ScratchField at +0x4564 - the two-sine height field
+                AND the scroller's 128-entry per-row table, at
+                different times
+
+   The demo is 386 code in real mode: PUSHAD, 32-bit operands, and FS
+   and GS are all used [verified].
+
+4.  Demo_Entry: the top-level script
+
+   1000:0000, 2,618 bytes, calling 38 routines directly [verified].
+   Ghidra first bounded it at 4,716 bytes by running it on through
+   Demo_Shutdown and the screen clears; carving Timer_Isr out of that
+   range is what corrected it. It is a linear script, not a table-driven
+   dispatcher, so there is no effect table to find anywhere in this demo.
+
+   ONE TIMELINE, THREE FUNCTIONS, CHAINED BY TAIL JUMPS - not two
+   levels and not a dispatcher [verified]:
+
+       Demo_Entry    1000:0000   setup, menu, parts up to sync 0x32
+         img 0a37  JMP 1000:4d6e      a JUMP, not a call
+       Demo_Timeline 1000:4d6e   parts 0x33 .. 0x52
+         img 53c4  JMP 1000:0a3a      to Demo_Shutdown
+
+   So nothing returns, there is no caller to come back to, and the sync
+   targets rise strictly across the whole chain. Demo_Entry's own 38
+   calls are its setup and its share of the parts; there are no further
+   scripts. See effects/script1_landscape.txt.
+
+   The opening, which is also the display subsystem's whole setup:
+
+       img 0000  mov dx,0x1cd2 / mov ds,dx      the STACK segment
+       img 0005  SS normalised to DS, SP adjusted
+       img 0010  in al,0x21 / or al,2 / out 0x21,al
+                                                masks IRQ1 at the PIC
+       img 0016  int 10h ax=0003                text mode 3
+       img 001b  int 10h ax=1112                load the 8x8 ROM font
+       img 0022  call 1000:53c7
+       img 0050  int 10h ax=0013                VGA MODE 13h
+       img 00fa  dx=0x3da     THE image's only retrace wait
+
+   Masking IRQ1 before anything else, and loading the 8x8 font, are
+   both for the text-mode setup menu that the strings in section 6
+   describe. Mode 13h at img 0x50 is where the intro proper starts.
+
+   Two INT 10h calls at img 0x0a86 and 0x0a8d repeat the mode-3 and
+   font setup, which is the exit path restoring the display.
+
+5.  The effect map
+
+   Ten `mov ax,0A000h` sites, so ten places that address the mode 13h
+   framebuffer [verified]. Each is attributed to the function holding
+   it, and the VGA ports each function touches are listed where it
+   touches any. **No effect has been identified**; these are the ports
+   and the framebuffer writes, which is what the bytes prove.
+
+   +---------------+-------------------+----------------------------------+
+   | Function      | 0A000h at         | VGA ports, and the caller        |
+   +===============+===================+==================================+
+   | 1000:0b13     | 0b13, at entry    | Vga_ClearScreen - a rep stosd    |
+   |               |                   | clear, NOT a renderer            |
+   +---------------+-------------------+----------------------------------+
+   | 1000:2504     | 2509              | maybe_Warp_Render, part 5 of     |
+   |               |                   | Demo_Timeline                    |
+   +---------------+-------------------+----------------------------------+
+   | 1000:2818     | 2825              | called from Demo_Entry           |
+   +---------------+-------------------+----------------------------------+
+   | 1000:287b     | 28ad              |                                  |
+   +---------------+-------------------+----------------------------------+
+   | 1000:2a1a     | 2a1a, at entry    | called from 1000:29bf            |
+   +---------------+-------------------+----------------------------------+
+   | 1000:2a99     | 2a99, at entry    | called from 1000:2358            |
+   +---------------+-------------------+----------------------------------+
+   | 1000:317a     | 317a, at entry    | dx=0x3c8 at 31d2 - palette;      |
+   |               |                   | called from 1000:260f            |
+   +---------------+-------------------+----------------------------------+
+   | 1000:32fa     | 32ff              | six callers, listed below        |
+   +---------------+-------------------+----------------------------------+
+   | 1000:3873     | 38e7 and 3905     | called from Demo_Entry           |
+   +---------------+-------------------+----------------------------------+
+
+   1000:32fa has six callers - 1000:2370, 23da, 23fe, 25c7, 25e2,
+   25f7 - which makes it shared machinery rather than one effect's
+   renderer. A blitter or a clear is the obvious guess and it is only a
+   guess.
+
+   The rest of the display subsystem, by port [verified]:
+
+   +---------------+-----------------------------------------------------+
+   | Function      | What it touches                                     |
+   +===============+=====================================================+
+   | Pal_Fade      | dx=0x3c8 at img 0x3b3c - the DAC, from              |
+   | 1000:3b17     | g_PaletteBase. The only path for the main palette   |
+   +---------------+-----------------------------------------------------+
+   | Pal_SetRgb-   | dx=0x3c8 at img 0x3e32 - the DAC directly,          |
+   | Ramps         | bypassing g_PaletteBase and so bypassing the fade   |
+   | 1000:3e31     |                                                     |
+   +---------------+-----------------------------------------------------+
+   | Demo_Entry    | dx=0x3da at img 0x00fa - THE ONLY RETRACE WAIT IN   |
+   |               | THE IMAGE, run once before any mode 13h work        |
+   +---------------+-----------------------------------------------------+
+
+FOUR CLAIMS THAT WERE IN THIS TABLE ARE WITHDRAWN, all from one
+   mistake: a raw byte search for a port number with no check that the
+   bytes are an operand rather than two adjacent ones.
+
+   o "1000:317a writes the palette, 0x3c8 at img 0x31d2" - those bytes
+     are `mov ah, 0xc8` then `add dx, si`. 317a is a rotozoom with
+     feedback. THE ONLY PALETTE WRITERS ARE Pal_Fade and
+     Pal_SetRgbRamps; see subsystems/palette.txt.
+   o "1000:2f28 streams palette entries through 0x3c9" - there is NO
+     0x3c9 access anywhere in the image.
+   o "1000:4124 is the only CRTC access, 0x3d4 at img 0x4114" - those
+     bytes are `xchg ah,dl` then `add ax,dx`. THERE IS NO CRTC ACCESS
+     IN THIS DEMO, so nothing builds a tweaked mode or a split screen.
+   o "retrace waits at 1000:3a7f and 1000:4d6e" - both sit inside the
+     two-sine terrain generators, where `add bx,dx / add bx,cx / shl
+     bx` happens to emit da 03.
+
+   tools/portscan.py reports REAL and STRADDLE separately. It is still a
+   heuristic and it called two of those three straddles real from a
+   wrong boundary, so confirm anything load-bearing against Ghidra's
+   listing - the only thing here that knows where instructions start.
+
+   THERE IS NO CENTRAL FRAME LOOP AND NO PER-FRAME RETRACE WAIT. The
+   timeline is Demo_Entry then Demo_Timeline at 1000:4d6e, chained by
+   tail jumps and ending in one to Demo_Shutdown; each part runs one
+   renderer that loops until the music reaches a target. Timing is the
+   INT 8 handler at 1000:0b60, which no call reaches, at g_Speed Hz.
+
+   See effects/script1_landscape.txt and subsystems/music.txt.
+
+   A trap worth stating, because the obvious approach walks into it:
+   SEARCHING FOR THESE PATTERNS WITH A PYTHON RAW BYTES LITERAL FINDS
+   NOTHING. `rb'\xb8\x13\x00'` is five literal characters, not three
+   bytes - the `r` prefix suppresses the escapes. Every pattern above
+   came back as zero hits once for that reason.
+
+6.  What the demo shows
+
+   [observed], reported from running it, and recorded here because it
+   is what tells the next reader which effects are still unaccounted
+   for. It is NOT evidence for any name - CLAUDE.md rule 12.
+
+   In order:
+
+   o a voxel landscape, brown land with blue water, with text over it
+     reading "isn't very proud to present" and "their first intro
+     called", the text shadowed by a flame
+   o a countdown from 4, each digit made of dots that ripple and then
+     expand outwards
+   o a spaceship, which flies up and around over the landscape
+   o a second spaceship that duels it, firing lasers - which may be an
+     object of their own
+   o two planets seen from a distance: one coloured like the voxel
+     landscape, the other an all-grey moon they land on
+   o a waving flag
+   o a car that drives over the voxel landscape
+   o a Star Wars style credits scroll
+   o a plasma background with 3D letters reading "THE END", with a
+     water-wave effect over them
+
+   The whole part list, with each scene's mode, sync target and runner,
+   is effects/timeline.txt. The models are placed there too: the two
+   craft at sync 0x14-0x23, the car at 0x3a, the "THE END" letters at
+   0x4b.
+
+   The two planets are Planet_Render at 1000:2925, a texture-mapped
+   sphere over a starfield - effects/planet.txt. It is the demo's
+   most-used renderer at six parts, and in four of them the ball is
+   suppressed, which is how the plain space and battle scenes are
+   drawn too.
+
+   THE LASERS AND THE FLAG ARE BOTH MESHES after all - the lasers out
+   of an eight-slot table with the weapon chosen by music position,
+   the flag a static pole and banner in the car scene. There are six
+   models in the image, not four. effects/battle.txt.
+
+   THE SCRATCH REGION IS 0xa890 TO 0xcc31 - 9122 bytes of
+   file-resident zeros the program fills at run time [verified]. It
+   holds g_SqrTable at 0xaf7c, g_GroundBandSrc at 0xb8b8, g_SpanBuf at
+   0xb8fc, g_PolyVerts at 0xc57c and g_PaletteBase at 0xc7a4, and the
+   initialised variable block ends immediately before it at 0xa88f.
+
+   A ZERO IN THAT RANGE MEANS UNINITIALISED, not a deliberate value.
+   That is worth knowing before concluding anything from one: it is
+   how g_GroundBandSrc was settled, and it is also why a zero there is
+   not evidence of a depack fault.
+
+   THE WARPS' OFFSETS COME FROM SIX SINE OSCILLATORS. The mode 6
+   handler at img 0x10b8 accumulates g_WarpOsc0..5 in 8.8 fixed point
+   at phase rates 2 to 7, and Warp_RenderFull reads only their high
+   bytes - which is what its byte-pair assembly is for. See
+   subsystems/animation.txt section 2.5.
+
+   WHAT IS STILL UNACCOUNTED FOR: the water wave over the THE END
+   letters. 1000:2504 is Flag_Render, the waving VISTA flag, not a
+   transition at sync 0x37, not that, so the wave has no mechanism
+   yet.
+
+7.  Strings, and what they tell us
+
+   Read out of the depacked image [verified]. Quoted as they are, which
+   CLAUDE.md rule 8 exempts from the ASCII rule.
+
+   The demo names itself and its group:
+
+       img 0a523   "a VISTAa  SOFTWARE  ISN'T VERY PROUD TO aPRESENT
+                    a THEIR     FIRST ..."
+       img 0a73d   "Start EXCURSION!"
+       img 0a4a7   "PS. Vista will change its name after Abduction '96.
+                    We don't know yet wh..."
+
+   So: EXCURSION, by Vista Software, for Abduction '96 - which fits
+   the file's 1996-06-06 date. Members credited at img 0x99d5 onward
+   include Seos (Tomi Mikkola), wing (Antti Hiukka), Exact (Jarno
+   Koole), juze and velli.
+
+   The controls, which are also the keyboard handler's specification:
+
+       img 0a626   "During the intro you can exit to DOS by"
+       img 0a650   " pressing the ESC key. You are also able to"
+       img 0a67c   " select the speed of the intro by pressing"
+       img 0a6a7   "  function keys 1 - 6. (F4 = Normal speed)"
+
+   **F1 to F6 selecting speed matters more than it looks.** A demo
+   with a selectable speed has an explicit time step somewhere, and
+   finding that variable gives the frame-rate basis for every effect at
+   once - which is exactly the thing CLAUDE.md rule 12 says not to
+   guess at. F4 being "normal" means the scale is an index into a
+   table of six, not a multiplier.
+
+   The setup menu, in text mode before the intro:
+
+       img 0a6f7   "Select one:"
+       img 0a706   "Soundcard settings..."
+       img 0a71d   "Exit without running the intro"
+       img 0a7ae   "Select Soundcard:"
+       img 0a7d8   "Sound Blaster or compatible"
+       img 0a7f8   "No Sound"
+       img 0a817   "210h", "220h", "230h", "240h", "250h", "260h"
+
+   And music: img 0x0d041 onward holds "WITHAMIG.254", "X774878X.527",
+   "x300168x.898", "THISMODU.537" - the sample-name table of a tracker
+   module, so the music is an embedded module and not a PC-speaker
+   score [inferred: the shape is a 22-character sample name field, but
+   the module format has not been identified].
+
+8.  Open questions
+
+   o **No effect is identified.** Section 5 bounds nine renderers by
+     what they touch. Which of them is which effect is unknown, and
+     rule 12 forbids settling it from a screenshot. The route in is
+     Demo_Entry's call order.
+
+   o **The music module's format and where the replayer is.** The
+     sample-name table is at img 0x0d041; nothing else about it is
+     known, and the replayer is off-mission except that it will own an
+     interrupt the frame loop has to share.
+
+   o **img 0x0569c - 0x0cd1f is mostly unexamined.** g_SinTable at
+     img 0x7f5e and the variable block at img 0x9368 are identified;
+     the rest is where the distance and colour tables must be.
+
+   o **The 1000:4124 CRTC access.** One site, and whether it builds a
+     tweaked mode or a split screen decides how to read the renderers
+     that follow it.
+
+   o **Is 108,432 bytes the whole image?** It is the last non-zero
+     byte, rounded up. Trailing zeros are indistinguishable from BSS
+     the decompressor never wrote, so the true end is at or above
+     this.

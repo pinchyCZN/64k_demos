@@ -1,0 +1,312 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                         EXCURSION'S MUSIC
+
+
+Abstract
+
+   A Scream Tracker 3 module, software-mixed into a Sound Blaster DMA
+   buffer by the INT 8 timer handler. Eight channels at g_Speed Hz,
+   single-cycle DMA restarted per block.
+
+   The countdown voice is SAMPLE DATA IN THE MODULE, not something the
+   demo code triggers - instruments 20 to 23 are 4.SMP, 3.SMP, 2.SMP
+   and 4.SMP. Section 5 is the full answer to that, because it also
+   explains how the graphics stay in step with it.
+
+   The replayer is read only as far as the graphics need it, which
+   is further than it looks: the landscape camera's speed IS two of
+   its channel volumes. effects/camera.txt has that part; the mixer
+   and the sample path stay bounded rather than read.
+
+Table of Contents
+
+   1. Where it lives
+   2. The output path
+   3. The module
+   4. The instruments
+   5. The countdown voice, and the sync
+   6. Playing it back
+   7. Open questions
+
+1.  Where it lives
+
+   +--------------------+---------------------------------------------+
+   | Thing              | Where                                       |
+   +====================+=============================================+
+   | Timer_Isr          | 1000:0b60, the INT 8 handler                |
+   | maybe_Music_Step   | 1000:2200, advances g_MusicPos              |
+   | Sb_WriteDsp        | 1000:42a4                                   |
+   | Timer_SetRate      | 1000:0b37                                   |
+   | g_SbBase           | 1000:992d, from the setup menu              |
+   | g_MusicPos         | 1000:9905, the sync counter                 |
+   | the module         | img 0x0cda0, g_S3mModule at 1cd2:00a0       |
+   +--------------------+---------------------------------------------+
+
+   Timer_Isr IS THE WHOLE PLAYER [verified]. It is reachable by no
+   call: Demo_Entry installs it at img 0x0128-0x0141 with INT 21h
+   AX=3508 to save the old vector and AX=2508 to set DX=0x0b60, and
+   Demo_Shutdown restores it. The vector write is the only reference
+   to it, so nothing in the control-flow graph leads there.
+
+   So the answer to "does it install an ISR to start the music" is yes,
+   and it is the same ISR that is the demo's entire timebase - one
+   INT 8 handler does the mixing, the tick counting and the module
+   stepping. There is no second interrupt and no IRQ from the sound
+   card.
+
+2.  The output path
+
+   Single-cycle 8-bit DMA, restarted per block [verified]. The DSP
+   commands the image actually issues, and the absences matter:
+
+   +------+--------------------------+------------------------------+
+   | Cmd  | What                     | Where                        |
+   +======+==========================+==============================+
+   | 0x40 | set time constant        | img 0x0147, 0x4242           |
+   | 0xd1 | speaker on               | img 0x423d                   |
+   | 0x14 | single-cycle 8-bit out   | img 0x424c, 0x223d           |
+   | 0xd0 | halt DMA                 | img 0x0a42, Demo_Shutdown    |
+   | 0xd3 | speaker off              | img 0x0a47, Demo_Shutdown    |
+   +------+--------------------------+------------------------------+
+
+   THERE IS NO 0x1C, so playback is not auto-init: the ISR has to
+   re-issue 0x14 for every block, which is what img 0x223d is for.
+   There is no 0x41 either, so the rate is set the old way through the
+   time constant and not as a sample rate.
+
+   The ISR finds the play position by reading the DMA controller rather
+   than by counting [verified]: img 0x0b9f writes port 0x0c to clear
+   the flip-flop, then reads channel 1's current address from port 0x03
+   twice and re-reads until two samples agree within 4. That is a
+   read-back sync against hardware, so the mixer writes ahead of where
+   the card is playing instead of trusting its own timing. img 0x0c99
+   writes the channel 1 page register, 0x83.
+
+   Eight channels are mixed: img 0x0bfe sets CX = 8 and the loop reads
+   a per-channel block through cs:[si + 0x93aa], with sample data
+   addressed from segment 0x1cda.
+
+3.  The module
+
+   Scream Tracker 3 [verified]. The SCRM magic is at img 0x0cdcc, so
+   the file begins at img 0x0cda0.
+
+   +------------------+---------+
+   | Field            | Value   |
+   +==================+=========+
+   | orders           |      82 |
+   | instruments      |      24 |
+   | patterns         |      41 |
+   | global volume    |      64 |
+   | initial speed    |       6 |
+   | initial tempo    |     125 |
+   | title            |  (empty)|
+   +------------------+---------+
+
+   It sits in the same segment as the stack: SS is 0x1cd2 and the
+   module starts at 1cd2:00a0, with SP initialised to 0x80. So the
+   stack has 128 bytes below the module and then wraps to the top of
+   the segment. Tight, and deliberate - not a bug, but worth knowing
+   before blaming the module for a corrupted byte.
+
+3.1.  Its length, and how to get it out
+
+   AN S3M CARRIES NO TOTAL LENGTH. The end has to be DERIVED as the
+   furthest of every pattern's end and every sample's end, each found
+   through its parapointer. tools/extract_s3m.py does that and refuses
+   to write if the derived end lands past the image, which is the check
+   that the base and the pointers were read correctly.
+
+       py -3.10 tools/extract_s3m.py
+           reverse/unpacked/xcursion.bin -o reverse/unpacked/xcursion.s3m
+
+   +------------------+----------------------------------------------+
+   | spans            | img 0x0cda0 to 0x1a78b                       |
+   | size             | 55,787 bytes                                 |
+   | share of image   | 51 PER CENT of the whole depacked demo       |
+   | created with     | Scream Tracker 3.20 (cwtv 0x1320)            |
+   | ends             | 5 BYTES BEFORE THE END OF THE IMAGE          |
+   +------------------+----------------------------------------------+
+
+   THE MODULE IS HALF THE DEMO. 55,787 of 108,432 bytes, which puts
+   the whole of the graphics - every effect, every table, the mesh
+   data and the font - in the other half. That is the budget this
+   project is reading, and it is worth knowing before wondering why
+   the effects reuse each other's buffers so aggressively.
+
+   It also ends five bytes short of the image end, which is the
+   tightest possible fit and a second check on the parse: a misread
+   pointer would have run past.
+
+   The bytes are NOT committed - .gitignore covers *.s3m on the same
+   reasoning as the depacked image. The extractor and these notes are
+   what travel.
+
+3.2.  The instruments
+
+   24 instrument slots, 13 of them named [verified]:
+
+   +----+------+----------------+-------------+
+   | #  | Type | Name           | Sample size |
+   +====+======+================+=============+
+   |  5 |    1 | WITHAMIG.254   |         168 |
+   |  6 |    1 | X774878X.527   |          40 |
+   |  7 |    0 | x300168x.898   |        1110 |
+   |  9 |    1 | THISMODU.537   |        1312 |
+   | 11 |    1 | BOOM4.SMP      |        7120 |
+   | 15 |    1 | x717027x.898   |        1898 |
+   | 16 |    1 | BDRUM6.007     |        1580 |
+   | 18 |    0 | WUA.IFF        |        4347 |
+   | 20 |    1 | 4.SMP          |        1291 |
+   | 21 |    1 | 3.SMP          |        1922 |
+   | 22 |    1 | 2.SMP          |        1679 |
+   | 23 |    1 | 4.SMP          |        2192 |
+   | 24 |    1 | IGNI.SMP       |        2827 |
+   +----+------+----------------+-------------+
+
+   INSTRUMENTS 20 TO 24 ARE THE COUNTDOWN VOICE - 4, 3, 2, 4 and
+   IGNI - which is what settles the sync question in section 1: the
+   voice is IN the module and the graphics wait on g_MusicPos, so it
+   cannot drift.
+
+   Type 1 is a PCM sample; type 0 with a non-zero length is a slot
+   whose data was dropped, and both of those have a zero sample
+   pointer.
+
+   SOME OF THE NAME FIELDS CARRY TEXT RATHER THAN FILENAMES, which is
+   an ordinary tracker habit - the field is 12 bytes of free text and
+   nothing reads it. There are no files behind them to find.
+
+4.  The instruments
+
+   Read out of the S3M instrument headers [verified]. Type 1 is a
+   sampled instrument; type 0 entries are empty or leftovers.
+
+   +----+------+--------------+--------+--------+-----------------------+
+   |  # | Type | Filename     | C2 spd |  Length| Name                  |
+   +====+======+==============+========+========+=======================+
+   |  5 |    1 | WITHAMIG.254 |  16726 |    168 |                       |
+   |  6 |    1 | X774878X.527 |   7941 |     40 |                       |
+   |  7 |    0 | x300168x.898 |   8363 |   1110 |                       |
+   |  9 |    1 | THISMODU.537 |   8363 |   1312 |                       |
+   | 11 |    1 | BOOM4.SMP    |   8363 |   7120 | boom4.smp (no header) |
+   | 15 |    1 | x717027x.898 |   8363 |   1898 |                       |
+   | 16 |    1 | BDRUM6.007   |  12363 |   1580 | bdrum6                |
+   | 18 |    0 | WUA.IFF      |   8363 |   4347 |                       |
+   | 20 |    1 | 4.SMP        |   8363 |   1291 | 4.smp (no header)     |
+   | 21 |    1 | 3.SMP        |   8363 |   1922 | 3.smp (no header)     |
+   | 22 |    1 | 2.SMP        |   8363 |   1679 | 2.smp (no header)     |
+   | 23 |    1 | 4.SMP        |   9363 |   2192 | 4.smp (no header)     |
+   | 24 |    1 | IGNI.SMP     |   8363 |   2827 | igni.smp (no header)  |
+   +----+------+--------------+--------+--------+-----------------------+
+
+   Instruments 1-4, 8, 10, 12-14, 17 and 19 are empty.
+
+5.  The countdown voice, and the sync
+
+   **The voice is in the module.** Instruments 20 to 23 are 4.SMP,
+   3.SMP, 2.SMP and 4.SMP, and 24 is IGNI.SMP - a countdown and
+   presumably an ignition, as sampled instruments played by the
+   module's own patterns [verified from the instrument headers].
+
+   There are two 4.SMP entries at different C2 speeds, 8363 and 9363,
+   which is how a tracker gets two pitches of one sample without
+   storing it twice. Nothing in the module says what the missing "1"
+   is; there is no 1.SMP, so either the sequence is 4-3-2-ignition or
+   the "1" is one of the unnamed instruments.
+
+   **Nothing in the demo code triggers it, and nothing needs to.** The
+   sync runs the other way: the graphics wait for the music. Every
+   renderer loops until g_MusicPos reaches g_MusicPosTarget, and
+   g_MusicPos is the module's own order position, advanced by
+   maybe_Music_Step from inside the ISR. So the musician placed the
+   voice samples in the patterns and the coder set the sync targets to
+   match - the graphics follow, to the order position, for free.
+
+   That also answers the question the other way round: it is NOT that
+   the graphics were timed to the voice by hand and happen to line up.
+   They are gated on the music, so they cannot drift from it, and a
+   change of g_Speed - the F1 to F6 keys - moves both together because
+   it only changes the tick rate at which the module is stepped.
+
+   The one thing this does not establish is WHICH order positions hold
+   the voice. That needs the pattern data read, which is section 6.
+
+6.  Playing it back
+
+   THE PORT RUNS TWO REPLAYERS OFF THE SAME BYTES, and they have
+   different jobs. xcursion_seq.c is this demo's own, img 0x0c68
+   transcribed, and it is an INPUT TO THE VISUALS - the landscape
+   camera's speed is two of its channel volumes, effects/camera.txt -
+   so it stays whatever else happens to the sound. The third-party
+   ibxm does the mixing, which the transcription deliberately does
+   not do.
+
+   g_MusicPos IS A PLAIN INC AND NEVER WRAPS, img 0x2205. The order
+   list is 82 entries with a single 0xff at the last, and nothing
+   skips it: the counter climbs straight off the end, which is how
+   it reaches the 0x52 the final part waits for - 82 exactly. A
+   replayer that wraps it modulo the order count can never produce
+   that value, and the demo's last part then never returns.
+
+   THEY AGREE ON THE CLOCK BY ARITHMETIC, NOT BY LUCK. The demo never
+   reads the module's tempo byte: its sequencer runs off the 100 Hz
+   timer halved, a fixed 50 ticks a second. This module's tempo is
+   125, and 125 * 2 / 5 is 50. So ibxm built at the device's own
+   sample rate runs at exactly the rate the demo's own replayer does,
+   and needs none of the rate scaling ukko's music does.
+
+   WHAT KEEPS THEM IN STEP IS WHICH COMMANDS MOVE THE POSITION. The
+   module uses eight, and only two of them do:
+
+   +---------+-------+--------------------------------------------+
+   | Command | Uses  | Effect                                     |
+   +=========+=======+============================================+
+   | A       |    52 | set speed - MOVES THE POSITION, both have  |
+   | C       |    23 | pattern break - MOVES IT, both have        |
+   | D       |  4012 | volume slide - THE CAMERA'S INPUT          |
+   | F G H O |   524 | porta, vibrato, offset - audible only      |
+   +---------+-------+--------------------------------------------+
+
+   There is NO TEMPO COMMAND anywhere in the 41 patterns, so the 50
+   ticks a second holds for the whole module and the agreement above
+   cannot be undone mid-song.
+
+   Measured over 150 seconds of playback, ibxm's sequence position is
+   the transcription's g_MusicPos less one at every sample, across
+   about fifty pattern changes, with no accumulated drift [verified].
+   The one is not an error: g_MusicPos is the NEXT order index -
+   next_pattern sets it when it opens a pattern - while ibxm reports
+   the one playing.
+
+   Mute and volume are the host's, in main_sdl.c, and attenuate what
+   this hands back: volume is a property of playing a recording, not
+   of the recording.
+
+7.  Open questions
+
+   o **Which orders and patterns hold 4.SMP, 3.SMP and 2.SMP.** That
+     would pin the countdown to exact g_MusicPos values and so to the
+     exact parts of Demo_Timeline, which is the one thing still
+     missing from matching parts to effects. The order list is at
+     img 0x0ce00 and the pattern parapointers follow the instrument
+     ones.
+
+   o **The demo's own effect support, which now matters.** The mixer
+     is bounded rather than read, so which of F, G, H and O it acts
+     on is unknown - and ibxm acts on all four. If the demo's mixer
+     ignores any of them the port is more ornamented than the
+     original. The sequence position is unaffected either way, so
+     this is a question about the sound and nothing else.
+
+   o **What is at segment 0x1cda**, which the mixer uses as its sample
+     data base. It is 8 paragraphs past the module's segment, so
+     probably the module's own sample area, but that is not checked.
+
+   o **cs:[0x93aa]**, the per-channel block the mixer loops over 8
+     times. Its stride and layout would be the channel struct.
+
+   o **Whether the "1" of the countdown exists.** No 1.SMP among the
+     24 instruments.

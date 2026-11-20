@@ -1,0 +1,318 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                     LITHIUM: THE BATTLE
+
+
+Abstract
+
+   Scene 2.12's first half. Fourteen object slots, EIGHT of them
+   flying a recorded track, over the voxel surface with the sky, the
+   flare and the trail blobs all running.
+
+   THE EIGHT TRACKS ARE LAID END TO END, 300 entries of three bytes
+   each - 1800 ticks of recording per craft. ONE OF THEM IS THE
+   SCENE'S CLOCK: only track 0 carries a stop command, three bytes
+   past the end of the other seven's length, and nothing else in the
+   battle can end it.
+
+   DECODING THEM SHOWS WHAT THE AUTHOR ACTUALLY PRESSED. Two craft do
+   almost nothing but strafe; five fire; none ends the scene.
+
+   All [verified] - the runner from disassembly, the command counts
+   by decoding the track data in the image.
+   effects/tracks.txt is the format and the command set.
+
+Table of Contents
+
+   1. The runner
+   2. The slots and their tracks
+   3. What is in the tracks
+   4. The projectiles
+   5. The swap
+   6. Which object is which
+   7. Open questions
+
+1.  The runner
+
+   1000:1c4f, from the main script at 1000:0336.
+
+       g_TickHandler = Tick_Default
+       for si = 0, 4, 8 ... 0x34:  Obj_Reset        FOURTEEN slots
+       the first eight also get a track and a position
+       g_PalSource = g_Pal1;  g_DepthNear = 0x1fbd
+       g_EnvMapAngle = 0
+       fill 0x4ad2 with 0x80808080;  clear the trail ring
+       g_MusicPosLast = g_MusicPos
+       g_PalFadeTarget2 = 0;  g_PalFade = 0xff60
+       g_PalFadeShiftReload = 3;  g_PalFadeShift = 6
+       g_TickHandler = Tick_Battle
+       g_ObjAxisSwap = 1;  g_SceneDone = 0;  g_FlashCountdown = 0xff
+       loop at 1000:2050:
+           eight Track_Play calls
+           Terrain_Build
+           nine object renders
+           the camera angles, then 1000:2e48 and 1000:31c7
+           Sky_SunAndStars;  Flare_Render
+           maybe_Sky_DrawPoint
+           Trail_Draw
+           1000:34d1;  Demo_PollKeys
+
+   Everything the demo has is on screen at once here: the voxel
+   terrain, nine meshes, the starfield, the sun, the lens flare and
+   the additive blobs.
+
+   THE COLOUR IS A STORED PALETTE, NOT A GENERATED ONE. g_PalSource
+   points at g_Pal1 and Pal_Animate never runs in this scene, so
+   everything on screen is that palette under the fade - which opens
+   at -0xa0 and comes up to 0 at a shift of 6, so the scene fades in
+   from black over about ten ticks.
+
+   g_ObjAxisSwap IS SET FOR THE WHOLE SCENE at 1000:203e, where the
+   flyover sets it per object. Mesh_Transform reads it unindexed, so
+   every craft and every bolt is built with the swap - leaving it
+   clear puts all twelve meshes on the wrong axes.
+
+   g_FlashCountdown IS PARKED AT 0xff at 1000:204a, which stops the
+   beat strobe firing for 255 ticks even though g_PalFlash is raised
+   on every music change - effects/bump.txt section 6.
+
+   g_RecordMode IS ONE BYTE WITH THREE JOBS. Tick_Battle clears it
+   every tick at 1000:6612, Tick_Tunnel uses it as the sixteen-tick
+   counter that advances the ring window - effects/tunnel.txt
+   section 5 - and Flight_Step reads it as the record/replay flag.
+   Clearing it here is what keeps the flight model in replay.
+
+2.  The slots and their tracks
+
+   +------+---------+-----------+-----------+
+   | Slot | Track   | x         | z         |
+   +======+=========+===========+===========+
+   | 0    | 0x8667  | 0x46000   | 0x42000   |
+   | 4    | 0x89ee  | 0x3c000   | 0x40000   |
+   | 8    | 0x8d72  | 0x40000   | 0x40000   |
+   | 0xc  | 0x90f6  | 0x44000   | 0x40000   |
+   | 0x10 | 0x947a  | 0x3c000   | 0x50000   |
+   | 0x14 | 0x97fe  | 0x40000   | 0x50000   |
+   | 0x18 | 0x9b82  | 0x44000   | 0x50000   |
+   | 0x1c | 0x9f06  | 0x40000   | 0x59000   |
+   +------+---------+-----------+-----------+
+
+   THE SPACING IS 0x384 EVERY TIME BUT THE FIRST, which is 0x387.
+   So the tracks are a contiguous array from 0x8667 to 0xa28a, every
+   one 300 entries, and track 0 has THREE EXTRA BYTES - one more
+   entry - carrying the stop command. Section 3.
+
+   THE THROTTLE IS NOT IN THAT SETUP AND IS NOT CLEARED. Obj_Reset
+   leaves g_SlotThrottle standing - subsystems/objects.txt - and
+   nothing between the flyover and here writes it, so slots 4 and
+   0xc arrive still holding what their flyover tracks last left,
+   measured as 1 and 2 where 2 is reverse. For the five ticks before
+   the first track record is read, slot 4 is therefore already
+   accelerating and slot 0xc already reversing, which is what breaks
+   the near row out of line even though all three read identical
+   opening records [verified].
+
+   THREE FORMATION ROWS AND TWO SINGLETONS. Slots 4, 8 and 0xc sit
+   abreast at z = 0x40000; slots 0x10, 0x14 and 0x18 abreast at
+   0x50000; slot 0 alone at 0x42000 and slot 0x1c alone at 0x59000,
+   both offset from the rows.
+
+   Slots 0x10 to 0x1c are also given a non-zero initial yaw, and the
+   six slots from 0x20 to 0x34 are reset but given neither a track
+   nor a position.
+
+3.  What is in the tracks
+
+   Decoding the eight tracks and counting the six-bit command of
+   every entry [verified from the image]:
+
+   +-------+---------+-----------------------------------------+
+   | Track | Entries | Commands used                           |
+   +=======+=========+=========================================+
+   | 0     | 288     | 0x02 x210, 0x18 x54                     |
+   | 1     | 296     | 0x0c x1                                 |
+   | 2     | 251     | 0x06 x49, 0x0c x4, 0x19 x4              |
+   | 3     | 211     | 0x06 x15, 0x07 x4, 0x08 x10, 0x0c x2,   |
+   |       |         | 0x0d x1, 0x19 x4                        |
+   | 4     | 187     | 0x0c x9, 0x19 x12                       |
+   | 5     | 299     | 0x06 x24, 0x0c x7, 0x19 x3              |
+   | 6     | 99      | 0x07 x13, 0x0c x1, 0x19 x5              |
+   | 7     | 294     | 0x03 x284, 0x05 x3                      |
+   +-------+---------+-----------------------------------------+
+
+   "Entries" counts entries with any non-zero byte, so a track with
+   fewer than 300 simply stops moving before the recording ends.
+
+THE TWO SINGLETONS ARE THE CAMERAS. Track 0 is 210 strafes one
+   way and track 7 is 284 the other, and almost nothing else -
+   commands 0x02 and 0x03 bank and slide along the craft's own X
+   axis, so a track made of one of them repeated flies a circle.
+   Neither slot is ever rendered, and Sky_SunAndStars takes the
+   camera orientation from slot 0's angle arrays, so these two are
+   CAMERA RIGS orbiting in opposite directions - section 6.
+
+   FIVE CRAFT FIRE: tracks 2 to 6 carry 28 instances of 0x19 between
+   them. Tracks 0, 1 and 7 carry none.
+
+   ONE TRACK ENDS THE SCENE AND IT IS THE 301st ENTRY OF TRACK 0, at
+   0x89eb [verified]. No other track contains command 0x01 anywhere,
+   and g_SceneDone has exactly one writer in the whole image - the
+   0x01 case of the command dispatch. Tick_Battle never touches it.
+
+   SO ALL EIGHT TRACKS RUN OUT TOGETHER. Track_Play has no bound and
+   would walk a slot straight into its neighbour's recording, but the
+   stop fires at the same moment the shortest track ends, so no slot
+   ever replays data that is not its own.
+
+   SPEED IS BARELY TOUCHED. 0x0c appears 24 times across all eight
+   and 0x0d once; the other twelve speed commands are unused, so the
+   author used two of the fourteen available speeds.
+
+   Commands 0x04, 0x1a and the repositioning 0x18 outside track 0 do
+   not appear at all.
+
+4.  The projectiles
+
+   The six slots from 0x20 to 0x34 are given no track and no
+   position. Tick_Battle drives them with Flight_StepRoll - straight
+   along their heading with a constant roll - and launches them:
+
+   FLIGHT_STEPROLL IS Flight_Step WITH THE MODEL TAKEN OUT, 1000:
+   61de. No throttle, no attitude easing, no track: the speed is
+   rotated by the pitch and then by the yaw, shifted down 0xb, added
+   to home, and the roll is advanced a fixed 0x40. The two rotations
+   are SEPARATE CALLS with the other two angles zeroed, so the pair
+   is one rotation at a different scale rather than two chained.
+
+   A bolt therefore cannot turn, and nothing it reaches knows about
+   it - there is no collision anywhere in the scene.
+
+       g_ProjTick++;  every 4th tick:
+           di = g_ProjNextSlot;  g_ProjNextSlot += 4
+           if it reaches 0x38:  g_ProjNextSlot = 0x20
+           si = Rnd_NextB & 7;  skip if si >= 6
+           si = si*4 + 4
+           skip if g_SlotFiring[si] == 1
+           copy slot si's home position and its pitch, yaw and roll
+               into slot di
+           g_SlotSpeed[di] = 0x1e0
+
+   A ROUND ROBIN OVER A RANDOM SOURCE. The destination cycles through
+   the six; the source is a random one of six craft. There is no
+   ownership and no aiming - a projectile starts wherever a craft
+   happens to be, pointing where it points.
+
+   TWO IN EIGHT DRAWS ARE WASTED. Rnd_NextB & 7 gives 0 to 7 and the
+   routine skips 6 and 7, so a quarter of the launch opportunities do
+   nothing. Masking to 8 and rejecting two is cheaper than a modulo.
+
+   THE DEMO HAS TWO WEAPON SYSTEMS AND THIS TEST KEEPS THEM APART:
+   a craft whose recorded track has fired - g_SlotFiring set by
+   command 0x19, effects/trail.txt section 5 - does not also launch a
+   mesh projectile.
+
+5.  The swap
+
+   On every music position change Tick_Battle calls Slot_SwapState
+   with slots 0 and 0x1c, which exchanges twenty per-slot arrays
+   through xchg rather than copying: flight and home on all three
+   axes, pitch, yaw and roll, angle set A, the roll rest, both
+   attitude accumulators, the command, the throttle, the speed, and
+   THE TRACK AND ITS CURSOR.
+
+   SWAPPING THE TRACK IS WHAT MAKES THE CUT LAND. The two rigs trade
+   recordings as well as positions and carry on from where the other
+   was, so neither jumps.
+
+   THE DRAWN POSITION IS NOT SWAPPED. g_SlotPos* is recomputed from
+   home by Obj_LoadOrient every frame, so exchanging it would be
+   undone before anything read it; nor is g_SlotFiring.
+
+   Those are the two slots whose tracks are nothing but opposite
+   strafes, so the two circling craft trade places in time with the
+   music.
+
+   THE SETUP PRIMES THE LATCH. img 0x1fe9 copies g_MusicPos into
+   g_MusicPosLast before the frame loop starts. The order has just
+   advanced to bring the scene in, so without it Tick_Battle reads a
+   change on its very first tick and cuts at once, leaving the camera
+   one rig out of step for the whole scene. Tick_Default updates the
+   latch afterwards, which is what makes each change cut exactly
+   once.
+
+   THE SECOND ENTRY PATH IS DEAD. img 0x1fed takes a different route
+   when g_BattleForceCut at 1000:8fcb is 1 - that route zeroes the
+   latch to force the opening cut - but Demo_Main at img 0x0330 is
+   the only writer of that byte and it stores 0 [verified].
+
+6.  Which object is which
+
+   The loop sets g_MeshSrcOff and g_MeshNrmOut before each render,
+   and there are TWELVE of them, not nine:
+
+   +----------------------+------------+-------+-------+-----------+
+   | Slots                | g_MeshSrc  | verts | faces | scale     |
+   +======================+============+=======+=======+===========+
+   | 4, 8, 0xc            | 0x72f8     |    35 |    68 | 0x10      |
+   | 0x10, 0x14, 0x18     | 0x4000     |    34 |    64 | 0x10      |
+   | 0x20 .. 0x34         | 0x724a     |     4 |     4 | 0xe       |
+   +----------------------+------------+-------+-------+-----------+
+
+   SIX CRAFT IN TWO DESIGNS OF NEARLY EQUAL SIZE, three abreast each,
+   and six projectiles. ../formats/mesh.txt section 4 is the model
+   table; 0x4000 is the same model the flyover uses, and 0x72f8 is
+   the one the tower fall flies.
+
+   THE PROJECTILE IS A TETRAHEDRON - four vertices, four faces. That
+   is the entire model for every bolt in the scene.
+
+   THE THREE GROUPS DIFFER BY ATTRIBUTE, NOT BY TEXTURE: the near
+   row takes 0 at 1000:20d4, the far row 0x6ad2 at 1000:2107 and the
+   bolts 1 at 1000:2146. One sphere map becomes two ship colours and
+   a bolt colour through the band alone - subsystems/raster.txt
+   section 4. The terrain is the only thing in the scene with a
+   texture of its own, g_BuildFaceAttr = 0x5ad2 at 1000:20a7, which
+   is the frame Tex_SnapshotFrame rendered.
+
+   THE TERRAIN'S TEXTURE COMES THROUGH THREE STAGES, and the middle
+   one is easy to miss:
+
+       Tex_BuildGlowNoise   1000:57e1   fills 0x5ad2 with noise
+       Tex_SnapshotFrame    1000:2496   terrain over it, back to 0x5ad2
+       the battle           1000:20a7   terrain over THAT
+
+   TEX_BUILDGLOWNOISE IS WHAT PUTS THE SCENE IN BAND 2. It opens
+   with DS = 0x5ad2 and fills the segment with 0x80 plus noise, so
+   every later stage samples band 2 and writes band 2 - the span is
+   the PLAIN one, 0x3bd8, and adds nothing. Measured at the tunnel's
+   end the segment is 64,000 bytes of band 0; measured again inside
+   the snapshot, at 1000:2548, it is 63,999 of band 2 [verified].
+
+   SO THE BAND IS NOT AN ATTRIBUTE AND NOT A SPAN ROUTINE. It is
+   carried in the texture from the moment that routine runs, which is
+   why a reconstruction that skips it draws the whole scene 0x80 too
+   low and in the wrong quarter of the palette.
+
+   MESH_TRANSFORM REBASES AGAINST SLOT 0, read unindexed at
+   1000:4e33 and 1000:4e44, so every craft is placed relative to the
+   camera rather than absolutely. Nothing in the loop sets that up -
+   it is a property of the transform, and a reconstruction that
+   leaves it out puts the formations a world away.
+
+   SLOTS 0 AND 0x1c ARE NOT IN THE TABLE because they are never
+   rendered. Slot 0x1c is not even ORIENTED in the frame - the loop
+   at 1000:2050 loads set B for twelve slots and skips it. They
+   carry tracks and are stepped like everything else,
+   but nothing points a mesh at them - and Sky_SunAndStars reads the
+   camera orientation out of slot 0's angle arrays. They are camera
+   rigs, which is why Slot_SwapState exchanging them on the music
+   reads as a cut between two angles.
+
+7.  Open questions
+
+   o Nothing outstanding.
+
+   o Why track 1 contains a single speed command and nothing else
+     while still having 296 non-empty entries - it is all mouse
+     movement.

@@ -1,0 +1,165 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                   LITHIUM: OPENING TO SURFACE FLYOVER
+
+
+Abstract
+
+   The opening does not cut to the next scene. Demo_Main runs a
+   straight-line script between the two - 1000:0201 to 1000:0262 -
+   and every visible thing it does is one global: g_PalFade. The
+   screen fades to black, the next scene's assets are generated while
+   it is black, the screen is cleared and the fade is driven UP past
+   zero until the picture is white, and the white is then held until
+   the module reaches order 8. Only then does the flyover start, and
+   its first act is to begin fading that white away.
+
+   Nothing in it is a special effect. It is the same quarter-step
+   walk in Tick_Default the opening's own ending uses -
+   ../subsystems/music.txt section 5 - pointed at four different
+   targets in turn.
+
+Table of Contents
+
+   1. The script, in order
+   2. The four fades
+   3. What holds the white
+   4. Measured against the emulator
+   5. The port
+   6. Open questions
+
+1.  The script, in order
+
+   +------------+--------------------------------------------------+
+   | 1000:0201  | g_TickHandler = Tick_Default, so no scene        |
+   |            | animates and the stored palette stops moving     |
+   | 1000:0208  | Font_Unpack                                      |
+   | 1000:020b  | g_PalFadeTarget2 = 0xff00          FADE TO BLACK |
+   | 1000:0212  | g_PalFadeShift = 0x0e, and 1000:0218 arms the    |
+   |            | same 0x0e as the reload                          |
+   | 1000:021e  | Mesh_Load 0x4b7c -> 0x9770                       |
+   | 1000:0232  | Math_BuildSquareTable                            |
+   | 1000:0235  | Tex_BuildGlowNoise                               |
+   | 1000:0238  | Flare_BuildSprite                                |
+   | 1000:023b  | g_MeshSrcOff = 0x4000, then Tex_RenderObjectTile |
+   | 1000:024b  | Mem_ClearSegment(0xa000)           the screen    |
+   | 1000:024e  | g_PalFade = 0xff80                               |
+   | 1000:0255  | g_PalFadeTarget2 = 0x00c0          FADE TO WHITE |
+   | 1000:025f  | Demo_RunUntil(8)                   hold          |
+   | 1000:0262  | maybe_Scene_SurfaceFlyover                       |
+   +------------+--------------------------------------------------+
+
+   THE FOUR GENERATORS RUN WHILE THE SCREEN IS BLACK, which is why
+   the black is held rather than instant: how long it lasts is how
+   long that machine takes, and nothing in the image fixes it.
+
+   THE WHITE COMES FROM A CLEARED SCREEN, not from anything drawn.
+   Mem_ClearSegment leaves every pixel at index 0, Pal_Animate has
+   stopped so the stored palette is frozen, and a POSITIVE g_PalFade
+   biases entry 0 upward: at +192 the bias is +48 and the whole
+   screen clamps to 0x3f.
+
+2.  The four fades
+
+   g_PalFadeShift only bites when the gap exceeds 1 << shift, and
+   every gap here is a few hundred, so all four walk at one or two a
+   tick whatever the shift is set to.
+
+   +----------------------+--------+--------+-------+--------------+
+   | fade                 | from   | to     | shift | ticks        |
+   +======================+========+========+=======+==============+
+   | the opening's ending | 0      | -256   | 0x0a  | 161 to exit  |
+   | the rest of the way  | -161   | -256   | 0x0e  | 95           |
+   | up to white          | -128   | +192   | 0x0e  | 320          |
+   | the flyover's own    | +288   | 0      | 0x08  | 272          |
+   +----------------------+--------+--------+-------+--------------+
+
+   The last one is the only one that is not a straight line: at
+   1000:1a2f the shift is 8, so the step is -2 while the fade is
+   above 256 and -1 below it - 16 ticks then 256.
+
+   1000:1a29 ARMS A DIFFERENT RELOAD FROM THE SHIFT IT RUNS AT. The
+   current shift is 8 and the reload is 3, so the fade-away happens
+   at 8 and everything the flyover arms afterwards moves at 3.
+
+3.  What holds the white
+
+   Demo_RunUntil at 1000:0cb9 is four instructions: poll the
+   keyboard, compare g_MusicPos against AX, loop while below. Called
+   with 8 it holds until the module reaches order 8, which is tick
+   2692 - ../subsystems/music.txt section 5.3 for why the boundaries
+   land where they do.
+
+   So the white is not held for a measured interval. It is held until
+   the music arrives, and the ramp is sized to finish first: 320
+   ticks from roughly 2250 reaches +192 near 2570, comfortably before
+   2692.
+
+4.  Measured against the emulator
+
+   Three readings, taken at the halt [verified]:
+
+   +-------+---------------------------------------------------------+
+   | phase | what it holds                                           |
+   +=======+=========================================================+
+   | lit   | tick 1766, order 5, g_PalFade 0 and target 0 - the      |
+   |       | title still lit and the fade not yet armed. Order 6     |
+   |       | arrives 158 ticks later and arms it                     |
+   | black | g_PalFade -206 toward -256, shift 0x0e, handler         |
+   |       | Tick_Default, g_MeshSrcOff 0x4b7c, g_EnvMapAngle        |
+   |       | frozen at 2086 - black, and halted inside Tex_Blur,     |
+   |       | so a generator is running                               |
+   | white | g_PalFade +38 toward +192, shift 0x0e, order 7,         |
+   |       | g_MeshSrcOff 0x4000 - 166 ticks into the white ramp     |
+   +-------+---------------------------------------------------------+
+
+   g_EnvMapAngle stops advancing the moment the opening returns,
+   because only its own handlers touch it. It is therefore a reliable
+   tick index during the opening and useless after it; across the
+   transition the palette fade is the clock.
+
+5.  The port
+
+   src/lithium/lithium_demo.c drives the same steps one tick at a
+   time, because Demo_RunUntil blocks and a host frame cannot. The
+   measured brightness of the result:
+
+       tick   2140   black
+              2400   ramping, mean 93
+              2550   white, mean 190
+              2700   full white, mean 255 - the flyover's +288
+              2980   black again, the fade-away complete
+
+   TWO DIFFERENCES, BOTH THE SAME ONE. The port generates nothing, so
+   its black is about 70 ticks shorter than the demo's and its white
+   ramp starts that much earlier. The sequence and every fade rate
+   are the same; only the length of the generator pause is not, and
+   that is a property of the machine.
+
+   [open] THE FLYOVER ITSELF IS NOT TRANSCRIBED. The port fills the
+   screen with 0x80 the way 1000:19f6 fills the back buffer, so the
+   white arrives and fades away correctly, and then there is nothing
+   behind it. What is missing is section 6.
+
+6.  Open questions
+
+   o maybe_Scene_SurfaceFlyover, 1000:18a3. It sets up its slots
+     through 1000:1bdf with SI stepping 0, 4, 8 and writes four
+     dwords per slot at 0x8959, 0x8991, 0x89c9 and 0x8a01 plus one at
+     0x8ddf - positions and bounds, presumably, for the ships. Its
+     tick handler is 1000:639e and it sets g_ObjAxisSwap, like the
+     opening.
+
+   o The four generators the transition runs:
+     Math_BuildSquareTable 1000:5334, Tex_BuildGlowNoise 1000:57e1,
+     Flare_BuildSprite 1000:5363 and Tex_RenderObjectTile 1000:5526.
+     None is read. The flare and the glow suggest the ships carry
+     sprites rather than only polygons.
+
+   o Which of the two meshes the transition loads is the ship:
+     0x4b7c into 0x9770, or 0x4000 into 0x8000.
+
+   o Font_Unpack at 1000:0208, which the opening never needed. The
+     greetings and credits use text, so it may simply be unpacked at
+     the first convenient black screen.

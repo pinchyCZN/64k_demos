@@ -1,0 +1,261 @@
+PCDEMOS 64k                                            Analysis Note
+
+
+                    EXCURSION: THE END SEQUENCE
+
+
+Abstract
+
+   The last three animation handlers - modes 0x1a, 0x1b and 0x1c at
+   img 0x1c23, 0x1c67 and 0x1c8f - which run the demo out from the
+   credits to the final fade.
+
+   All three carry THE SAME THREE-INSTRUCTION LIGHT BLOCK, verbatim,
+   and it is the only place in the whole demo that animates the light.
+   Everywhere else g_LightPitch, g_LightYaw and g_LightRoll are set
+   once by the script and left.
+
+Table of Contents
+
+   1. Mode 0x1a - the THE END letters
+   2. Mode 0x1b - the plasma, and the white flash
+   3. Mode 0x1c - the driven oscillator
+   4. Water_Refract - the picture displaced
+   5. The light, and why it matters
+   6. The transcription
+   7. Open questions
+
+1.  Mode 0x1a - the THE END letters
+
+   Its part is sync 0x4b, whose runner is TheEnd_Run at 1000:25c7 and
+   whose model is 0x5c47 - 120 verts and 94 faces, the largest in the
+   image [verified]:
+
+       g_LightPitch += 4      g_ObjPitch += 8
+       g_LightYaw   += 8      g_ObjYaw   += 6
+       g_LightRoll  += 0xc    g_ObjRoll  += 4
+       g_ObjTransZ -= 0x100
+       if g_FadeLevel != 0: g_FadeLevel += 0x30, Pal_Fade
+
+   TWO INDEPENDENT ROTATIONS AT DIFFERENT RATES. The letters turn at
+   8/6/4 and the light at 4/8/0xc, so the highlight sweeps across them
+   rather than sitting still - and because the rates share no common
+   factor with each other the pattern does not repeat quickly.
+
+   g_ObjTransZ falls 0x100 a tick, so the letters approach the camera
+   for the whole part - from 0x1e000, NOT the 0x20000 img 0x52a4 sets.
+   Mesh_FaceNormals at img 0x52de overwrites it three instructions
+   later and never puts it back, so the tumble ends at 0x6100 and the
+   next part's 0x6000 is no jump in size. formats/mesh.txt section 5.
+
+   The fade here is INWARD: the level climbs while it is non-zero, so
+   the part fades up from whatever the credits left and then holds.
+
+2.  Mode 0x1b - the plasma, and the white flash
+
+   Its part is sync 0x4c, img 0x5314, and the cut into it is the one
+   place in the end sequence where the picture jumps:
+
+       g_FadeLevel = 0x4000             img 0x5314 - FULL WHITE
+       Pal_Fade
+       g_AnimMode = 0x1b
+       g_ObjTransZ = 0x6000             img 0x5324
+       g_ObjPitch = g_ObjYaw = g_ObjRoll = 0        img 0x532e
+       Vga_ClearScreen
+
+   THE LETTERS ARE SNAPPED SQUARE, NOT SLOWED INTO PLACE. There is no
+   counter, no deceleration and no test on the angles anywhere: three
+   word stores zero all of them outright, and the white flash set one
+   instruction earlier is what hides the jump. The same store pulls
+   g_ObjTransZ back to 0x6000, nearer than the walk-in of mode 0x1a
+   ever brought it, so the letters also grow at the cut [verified].
+
+   The handler is six instructions:
+
+       the same light block, 4 / 8 / 0xc
+       if g_FadeLevel != 0: g_FadeLevel -= 0x40, Pal_Fade
+
+   A fade OUT at 0x40 a tick, and nothing else. 0x4000 at 0x40 a tick
+   is 256 ticks, which is most of the part, so the whiteout bleeds
+   away across it rather than snapping back. The light keeps tumbling
+   either way.
+
+   The background is built once, at entry, and never again:
+
+       Plasma_Generate into 0x6a79, rough 1, bias 0x2000, mask 0x3fff
+       img 0x5367 - 204 rows of 320, al = (plasma >> 3) + 0xe0
+
+   The plasma is read at its own 256-byte row pitch and written at
+   the screen's 320 - that is all the `sub si, 0x40` at img 0x5384
+   is. The shift leaves 0 to 31 and the add lands them in 0xe0 to
+   0xff, which is the dark red ramp img 0x3f9b put at 224. 204 ROWS,
+   NOT 200, so the fill runs 1280 bytes past the picture and into the
+   rest of the segment; section 4 is what reads that slack back out.
+
+   Its runner is TheEnd_Run's SECOND ENTRY POINT, img 0x25e2 - the
+   same Mesh_Draw / Vga_Present / Demo_WaitTick loop as sync 0x4b
+   without the Buf_Clear at the top. So the plasma survives from
+   frame to frame and the letters are redrawn over the same pixels
+   every time. They can be, because nothing moves them any more: only
+   the light moves, so each frame re-shades them in place.
+
+3.  Mode 0x1c - the driven oscillator
+
+   The last part, sync 0x52, after which Demo_Timeline jumps to
+   Demo_Shutdown [verified]. Its entry is img 0x5394: both water
+   buffers cleared, g_WaterBufA = 0x6a79, g_WaterBufB = 0x7a79, the
+   damping at img 0xa59f raised from 4 to 6, and NOTHING REBUILDS THE
+   PICTURE - it is whatever sync 0x4c left in the work buffer, plasma
+   and letters both, and from here it is only ever displaced.
+
+       g_EndOscPhase += 0x20
+       g_EndOscAmp++
+       bx = g_EndOscPhase & 0x7fc
+       eax = (g_SinTable[bx] * g_EndOscAmp) >> 0xb
+       ds = g_WaterBufB
+       word [0x3f20] = ax
+       the same light block, 4 / 8 / 0xc
+       if g_MusicPos >= 0x50: g_FadeLevel -= 0x18, Pal_Fade
+
+   ONE WORD, AT ONE FIXED OFFSET, WITH A RAMPING AMPLITUDE. That is
+   the whole of it. The grid is 160 by 100 signed words, so 0x3f20 is
+   word 8080 - row 50, column 80, the exact centre of the field.
+
+   IT DRIVES THE BUFFER THE SOLVER READS, not the one it writes - the
+   opposite of the dripping scene's drops at img 0x1696. By the time
+   the handler runs, Water_Step has already swapped, so g_WaterBufB
+   is the frame just computed and the poke lands in the neighbours
+   the next step will average.
+
+   g_EndOscAmp is incremented every tick with no ceiling and
+   multiplies the sine, so the disturbance grows for as long as the
+   part runs. A single driven point whose swing increases.
+
+   The phase advances 0x20 a tick, so a full turn is 0x800 / 0x20 = 64
+   ticks, 0.64 s at g_Speed 100.
+
+   The wave spreads far more slowly than the solver's one cell a step:
+   integer truncation kills the wavefront, so at 73 steps the
+   disturbance is 14 cells wide and at 350 it has reached the screen
+   edges [verified, against a live run at matched g_EndOscAmp].
+
+   ITS LOOK IS MACHINE SPEED, and this is the part of the demo where
+   that shows most. The drive turns once per 64 TICKS and the solver
+   steps once per FRAME, so the drive's period measured in SOLVER
+   STEPS is 64 times the frames-per-tick the machine achieves - and
+   that period is what decides both the ripple's wavelength and how
+   far it carries.
+
+   IT IS NOT A GENTLE DEPENDENCE. A point source driven slowly
+   relative to its medium barely radiates - it bulges the field
+   around itself and the energy damps where it stands - while a
+   faster one launches travelling rings. Between 45 steps a cycle and
+   31 the far field does not change by a half, it changes by an order
+   of magnitude. Measured on row 49 at g_EndOscAmp 813, at the
+   screen's left edge 80 cells from the drive:
+
+       the demo             25       [observed]
+       at 48 frames/tick   -43       rings, matching amplitude
+       at 70 frames/tick     0       dead - the corners never move
+
+   THE REFERENCE RUN HOLDS ABOUT 48 FRAMES A SECOND THROUGH THIS PART
+   against the 100 Hz timer - 13 solver steps in 19 emulated video
+   frames [observed] - because the frame draws a mesh, solves 16000
+   cells and refracts 64000 pixels. The light parts of the same run
+   hold the full 100. So the port gives this part its own frame rate,
+   XCUR_END_WATER_HZ, rather than the XCUR_FRAME_HZ the rest uses:
+   see subsystems/animation.txt section 1.1.
+
+   WHAT A PERIOD MACHINE MANAGED IS NOT RECORDED ANYWHERE. 100 is
+   what the timer asks for and what no measured run of this part
+   reaches; 48 is what one does.
+
+4.  Water_Refract - the picture displaced
+
+   img 0x2a99, the last renderer in the demo, driven by TheEnd_RunWater
+   at 1000:2358: Mesh_Draw, Water_Step, this, Demo_WaitTick. THERE IS
+   NO Vga_Present in that loop, because this writes 0xa000 itself and
+   reads the work buffer as its source. Those two are the same buffer
+   nowhere else in the end sequence.
+
+   Per field cell, img 0x2ab3:
+
+       ax = height >> 3
+       bx = di + ax + (ax << 6) + (ax << 8)   =   di + 321 * ax
+
+   321 IS 320 + 1, so the sample moves one row down and one pixel
+   right per unit of height: the displacement runs along the screen
+   diagonal, and a ripple shears the picture rather than stretching
+   it in one axis. Three shifts and three adds, no trigonometry.
+
+   img 0x2ac7 subtracts 0x600 when bx is 0xfd00 or above, and
+   0x10000 - 0xfa00 IS 0x600 - SO IT IS A MODULAR WRAP BY THE PICTURE
+   SIZE, not a clamp. A sample that ran off the top comes back in at
+   the bottom. 0xfa00 to 0xfcff is left alone and reads past the
+   picture into the segment's slack, which is why section 2's fill
+   runs 204 rows.
+
+   One cell covers a 2x2 screen block, and the lower row comes from
+   its own read 0x140 further on rather than from doubling the upper
+   one - so the block keeps the source's vertical detail.
+
+5.  The light, and why it matters
+
+   g_LightPitch, g_LightYaw and g_LightRoll are written in exactly
+   seven places in the image [verified]: four script sites in
+   Demo_Entry, one in Demo_Timeline, and the three identical
+   `add 4 / add 8 / add 0xc` blocks in these handlers. Mesh_Draw reads
+   them at img 0x47c4, 0x47ce and 0x47d8.
+
+   So for the whole demo up to sync 0x4b the light is a constant that
+   the script resets per part. Only in the end sequence does it move.
+
+   THAT IS WORTH KNOWING BEFORE "FIXING" ANY LIGHTING. The light
+   sweeping over an object is sometimes an artifact of Mesh_Draw
+   rotating the normal twice - see formats/mesh.txt - and sometimes,
+   here, exactly what the demo asked for. The two cases look similar
+   on screen and have different causes.
+
+6.  The transcription
+
+   src/xcursion/xcursion_demo.c has anim_tick26 and scene_theend for
+   mode 0x1a - the two rotations, the z walk and the fade climb, with
+   TheEnd_Run's clear-draw-present-wait around them. The part is
+   img 0x5290: the letters start at z 0x20000 with the camera angle
+   zeroed, the sky bias at 0x1c and the y offset at 0x2300.
+
+   ITS PALETTE IS BUILT IN THE PREVIOUS PART'S TAIL, img 0x5287,
+   after Scroller_Run returns - nothing in this part builds one. The
+   fade the letters rise out of is the negative level mode 0x19 drove
+   past zero.
+
+   THAT PALETTE IS CYCLIC WITH A PERIOD OF SIXTEEN [verified]. img
+   0x3f1e writes every entry FOUR TIMES - at DI and at DI+0x30, +0x60
+   and +0x90, sixteen entries apart - so 1 to 64 are four copies of
+   one ramp:
+
+       1 ..  8   (0, g, 0x3f)  g rising  0 to 49 by 7   blue -> cyan
+       9 .. 16   (0, g, 0x3f)  g falling 56 to 7 by 7   cyan -> blue
+
+   The letters' shades land in 8 to 50, so they cross that cycle
+   three times and BAND blue, cyan, blue as they turn. A single
+   64-entry ramp gives one smooth wash and no banding, which is what
+   a transcription that misses this looks like.
+
+   img 0x3f9b then puts a dark red ramp at 224 and leaves 65 to 223
+   as the previous palette had them.
+
+   anim_tick27 / scene_endplasma carry mode 0x1b and img 0x25e2, with
+   end_background for the 204-row fill; anim_tick28 / scene_endwater
+   carry mode 0x1c and img 0x2358, and Xcur_WaterRefract in
+   xcursion_water.c is img 0x2a99.
+
+   THE WORK BUFFER IS A SEPARATE 64 KB ARRAY in those two parts, where
+   the rest of the port draws straight into the framebuffer. It has to
+   be: section 4 reads the one while writing the other, and it reads
+   past 64000.
+7.  Open questions
+
+   o The letterforms. The model at 0x5c47 is the demo's own and is
+     transcribed as it stands, but no document records how its 94
+     faces were authored.

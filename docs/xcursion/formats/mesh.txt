@@ -1,0 +1,511 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                   EXCURSION'S 3D MODEL FORMAT
+
+
+Abstract
+
+   Four models live in XCURSION_U.EXE's code segment. A vertex is THREE
+   SIGNED BYTES, which is how a 64k intro affords geometry at all, and
+   a face is ten bytes.
+
+   The format is verified by its own arithmetic: model 0's faces end at
+   img 0x585f, which is exactly where model 1's header begins, and
+   every face index in all four models lands inside its own vertex
+   count.
+
+   The credits name "3D-Models" as a job - see effects/scroller.txt
+   section 4 - so the models are expected to be there.
+
+Table of Contents
+
+   1. The layout
+   2. The four models
+   3. The pipeline
+      3.0. Where the object is put
+         3.0.1. Four values that are globals, not constants
+   3.1. Signed or unsigned, per divide
+      3.2. The far gate, and why the craft does not draw yet
+   4. The scale trap
+   5. Mesh_Draw: cull, light, sort, fill
+   6. What the reconstruction does
+   7. The attribute byte
+   8. Open questions
+
+1.  The layout
+
+   +--------+--------+-------------------------------------------------+
+   | Offset | Size   | What                                            |
+   +========+========+=================================================+
+   | +0     | word   | vertex count N                                  |
+   +--------+--------+-------------------------------------------------+
+   | +2     | N x 3  | vertices: x, y, z as SIGNED BYTES               |
+   +--------+--------+-------------------------------------------------+
+   | then   | byte   | face count F                                    |
+   +--------+--------+-------------------------------------------------+
+   | then   | F x 10 | faces                                           |
+   +--------+--------+-------------------------------------------------+
+
+   A face record:
+
+   +--------+--------+-------------------------------------------------+
+   | +0     | byte   | THIS FACE'S vertex count, 3 or 4                |
+   +--------+--------+-------------------------------------------------+
+   | +1     | byte   | colour or shading attribute                     |
+   +--------+--------+-------------------------------------------------+
+   | +2     | word   | vertex index 0, ONE-BASED                       |
+   | +4     | word   | index 1                                         |
+   | +6     | word   | index 2                                         |
+   | +8     | word   | index 3; for a triangle this REPEATS index 2    |
+   +--------+--------+-------------------------------------------------+
+
+   A TRIANGLE STORES ITS THIRD INDEX TWICE, which is why
+   Mesh_FaceNormals at img 0x4418 can read four indices and average
+   them unconditionally without caring how many sides the face has
+   [verified]. The +0 byte is there for whatever walks the edges.
+
+   Indices are one-based: Mesh_FaceNormals does `shl bx, 5` then reads
+   `[bx - 0x20]`, so a stored index k addresses vertex k-1 at the
+   32-byte stride of the transformed array [verified].
+
+2.  The four models
+
+   The four g_MeshFaces values the script stores, at img 0x0466,
+   0x04ea, 0x51a3 and 0x52c9 [verified]:
+
+   +----------+-------+-------+------+------+-----------------+----------------+
+   | At img   | Verts | Faces | Tris | Quads| Attributes      | Extent x,y,z   |
+   +==========+=======+=======+======+======+=================+================+
+   | 0x572f   |    17 |    25 |   20 |    5 | 0x20, 0xc0      | 54 x 29 x 44   |
+   +----------+-------+-------+------+------+-----------------+----------------+
+   | 0x585f   |    34 |    45 |   26 |   19 | 0x20, 0xc0      | 58 x 25 x 41   |
+   +----------+-------+-------+------+------+-----------------+----------------+
+   | 0x94f4   |    54 |    54 |   30 |   24 | 0x00,0x20,0x60  | 30 x 12 x 43   |
+   +----------+-------+-------+------+------+-----------------+----------------+
+   | 0x5c47   |   120 |    94 |   12 |   82 | 0x08            | 55 x 40 x 10   |
+   +----------+-------+-------+------+------+-----------------+----------------+
+
+   The first two are compact and elongated along z with a pointed end -
+   the shape of a craft. The last is FLAT, 10 units deep against 55 by
+   40, and almost all quads with one attribute: that is extruded
+   lettering or a logo, not a vehicle [inferred].
+
+   WHAT IS ON SCREEN, reported from running the demo [observed]: a
+   spaceship at the start; a second spaceship that duels it mid-demo,
+   firing lasers; a car that drives over the landscape near the end;
+   and 3D letters reading "THE END" over a plasma, with a water-wave
+   effect over them.
+
+   Four models and four described objects, and the dimensions line up
+   one-to-one - 0x572f and 0x585f as the two craft, 0x94f4 long and
+   flat in y as the car, 0x5c47 flat in z as the letters.
+
+   +----------+---------------+------------------------------------------+
+   | Model    | Set at sync   | What it is                               |
+   +==========+===============+==========================================+
+   | 0x572f   | 0x14, 0x15    | on screen WITH 0x585f, so the two craft  |
+   |          |               | of the battle                            |
+   +----------+---------------+------------------------------------------+
+   | 0x585f   | 0x14, 0x23    | two separate passages - the craft that   |
+   |          |               | recurs                                   |
+   +----------+---------------+------------------------------------------+
+   | 0x94f4   | 0x3a          | THE CAR. Its part is the only one that   |
+   |          |               | calls Terrain_HeightAt, and twice        |
+   +----------+---------------+------------------------------------------+
+   | 0x5c47   | 0x4b          | THE "THE END" LETTERS - the part         |
+   |          |               | straight after the credits scroll        |
+   +----------+---------------+------------------------------------------+
+
+   The two decisive pieces of evidence are structural rather than
+   visual. Terrain_HeightAt answers "how high is the ground here",
+   which is what something driving over the landscape needs and an
+   aircraft does not; and an end card goes after the credits.
+
+   Both agree with what the demo shows [observed] - 0x572f recognised
+   as the attacking ship, the other craft seen in several scenes - and
+   neither was derived from it.
+
+   THAT IS NOT THE WHOLE SET. Scanning every store to g_MeshFaces
+   found SIX models: these four plus 0x5b81 and 0x5a8a, the two
+   weapons Shots_Draw alternates by music position, and 0x5be7, the
+   flag Car_Run plants beside the terrain. effects/battle.txt section
+   5 lists all six with their counts.
+
+   The planets are not meshes - they are Planet_Render's mapped
+   sphere, effects/planet.txt.
+
+3.  The pipeline
+
+   +-----------------------+--------------------------------------------+
+   | Mesh_SetupTransform   | 1000:45eb, the object-to-camera offset     |
+   | Mesh_TransformVerts   | 1000:4960, per vertex                      |
+   | Vec_Rotate3           | 1000:4a22, three Euler angles              |
+   | Mesh_FaceNormals      | 1000:43d4, per face: centre and normal     |
+   | Mesh_Draw             | 1000:465c, cull, light, sort, fill         |
+   | Poly_Fill             | 1000:4b2c, the rasteriser                  |
+   | Terrain_HeightAt      | 1000:3d93, puts an object on the ground    |
+   +-----------------------+--------------------------------------------+
+
+   1000:43d4 IS NOT A RENDERER - nothing in it draws. It computes a
+   face centre and a unit normal, which is a preprocessor; the
+   rasteriser is Poly_Fill and it is a separate, general routine.
+
+   Per vertex, img 0x4978-0x4a19 [verified]:
+
+       x = sx << 3
+       y = sy << 3
+       z = (sz * g_MeshZScale) >> 5
+       Vec_Rotate3 by g_ObjPitch, g_ObjYaw, g_ObjRoll
+       x += g_ObjTransX ; y += g_ObjTransY ; z += g_ObjTransZ
+       if z < 0x2328: z = 0x2328
+       d = z >> 3
+       screen x = ((x << 4) / d) + 0xa0
+       screen y = ((y << 4) / d) + 0x48 + g_SkyBias
+
+   So the focal length is 128 and the centre is (0xa0, 0x48) - and
+   0x48 IS THE SAME HORIZON CONSTANT Voxel_Render uses, so a model and
+   the landscape share a horizon by construction rather than by tuning.
+
+   The transformed array is 32 bytes a vertex: the rotated x, y, z as
+   dwords at +0, +4, +8, the projected screen x and y as words at +0xc
+   and +0xe, then scratch.
+
+   The near clamp at 0x2328 is not defensive. Without it the divide
+   would fault on a vertex behind the camera, and clamping rather than
+   culling means a face straddling the plane STRETCHES instead of
+   disappearing - a visible artefact that is part of the effect.
+
+3.0.  Where the object is put
+
+   img 0x45eb - Mesh_SetupTransform, read in full [verified]:
+
+       g_ObjPitch = 0
+       g_ObjYaw   = cs:[0x987d], THE CAMERA'S OWN HEADING
+       g_ObjRoll  = 0
+
+       v = (cs:[0x9368] - cs:[0x9360],              the camera's
+            -((cs:[0x9460] - g_CamScale) << 5),      target, minus
+            cs:[0x936c] - cs:[0x9364])               the camera
+       v = Vec_Rotate3(v, pitch, yaw, roll) >> 6
+       v.z -= v.z >> 3                               ie. times 7/8
+       g_ObjTransX/Y/Z = v
+
+   SO THE OBJECT SITS AT THE CAMERA'S TARGET AND FACES ALONG ITS
+   HEADING. 0x9368 and 0x936c are the same target pair the second
+   camera handler reads - ../effects/voxel.txt section 8.3 - so the
+   craft and the camera are aimed at one point by construction.
+
+   The `sar 6` here is the shift Mesh_TransformVerts omits, which is
+   section 4.
+
+3.0.1.  Four values that are globals, not constants
+
+   EVERY ONE OF THESE WAS A PLAUSIBLE CONSTANT AND NONE OF THEM IS.
+   Each is read from the variable block at draw time, so a static
+   value taken from the file is only right until something writes it.
+
+   +-----------------+---------+----------------+--------------------+
+   | What            | At img  | Read at img    | Countdown value    |
+   +=================+=========+================+====================+
+   | the model       | 0x98ad  | 0x4960         | 0x585f, 34 verts   |
+   | the z scale     | 0x9374  | 0x498f         | 0x100              |
+   | the y term      | 0x9460  | 0x4606         | 0x0a10             |
+   | the y bias      | 0x996d  | 0x49f9         | -39                |
+   +-----------------+---------+----------------+--------------------+
+
+   o THE MODEL IS WHICHEVER img 0x98ad NAMES, not the first in the
+     block. 0x572f is a 17-vertex model belonging to some other part.
+
+   o THE Z SCALE IS 0x100, so img 0x498f's `imul` and `sar 5` scale z
+     by 8 - exactly what img 0x4999 does to x and y with `shl 3`. The
+     transform is UNIFORM. A larger value stretches the model along
+     its own axis and changes nothing else, which reads as a wrong
+     model rather than a wrong number.
+
+   o THE Y TERM IS NOT ZERO once the landscape has flown. img 0x4606
+     takes g_9460 minus a MOVZX of g_CamScale - unsigned, so the
+     difference is signed only through g_9460. Left at zero the
+     object hangs about a screen and a half low.
+
+   o THE Y BIAS IS A SECOND ADDEND after the 0x48 at img 0x49f6, and
+     it is zero in the file. At the countdown it is -39, which is
+     about a fifth of the screen.
+
+   All four are in the same state the landscape's flight leaves them,
+   and that flight is unported - ../effects/voxel.txt section 8.3.
+
+3.1.  Signed or unsigned, per divide
+
+   EVERY DIVIDE THAT CAN SEE A NEGATIVE NUMERATOR IS IDIV, which
+   truncates toward zero. A transcription that floors instead differs
+   by one wherever the numerator is negative [verified]:
+
+   +----------------------+-----------------------+-----------------+
+   | Function             | Divides               | Signed?         |
+   +======================+=======================+=================+
+   | Mesh_TransformVerts  | img 0x49e5, 0x49f4    | idiv - signed   |
+   | Poly_Fill            | img 0x4bf7, 0x4c06,   | idiv - signed   |
+   |                      | 0x4d3a                |                 |
+   | Mesh_FaceNormals     | img 0x45b1, 0x45c4,   | idiv - signed   |
+   |                      | 0x45d7                |                 |
+   | Mesh_Draw            | img 0x475d, 0x486f    | div - UNSIGNED  |
+   +----------------------+-----------------------+-----------------+
+
+   Mesh_Draw's two are the sort key's 4/3 and the averaged vertex
+   shade, and both operands are non-negative there, so the choice is
+   deliberate rather than incidental.
+
+   THE DIFFERENCE IS VISIBLE, NOT THEORETICAL. One frame of model
+   0x572f at pitch 0x400, yaw 0x800, z 0x8000: truncating and flooring
+   disagree on 512 of 64,000 pixels - 333 of them lit in both but one
+   or two shade indices apart, the rest edges off by a pixel.
+
+   C's / truncates, so plain C is right here. sim/xcursion/parts.py
+   floors, in mesh_transform, poly_fill and face_normal, and is wrong
+   on the negative half - it carries an _idiv helper for exactly this
+   and those three do not call it.
+
+3.2.  The far gate, and which scene the craft belongs to
+
+   img 0x2373 calls Mesh_SetupTransform and img 0x237f calls Mesh_Draw,
+   with img 0x2376 between them:
+
+       cmp ecx, 0x28000
+       jae  skip
+
+   ecx is the object z Mesh_SetupTransform just stored, and JAE IS
+   UNSIGNED - so a negative z is a huge unsigned one and the craft is
+   skipped. That reads correctly as "behind the camera, do not draw".
+
+   IT REJECTS THE CRAFT FOR THE WHOLE OPENING, AND THAT IS CORRECT.
+   Halting at img 0x2376 and reading ecx in a running demo [verified]:
+
+   +---------------------+-------------+-------------+--------------+
+   | Scene               | ecx         | As unsigned | Draw?        |
+   +=====================+=============+=============+==============+
+   | the opening         |    -321,740 | 0xfffb1734  | skipped      |
+   | the countdown       |     +24,780 | 0x000060cc  | DRAWN        |
+   +---------------------+-------------+-------------+--------------+
+
+   Section 3.0's arithmetic predicts -321,740 for the opening from the
+   statics alone, and that is the value the register holds - so the
+   sign and axis mapping are right to the byte.
+
+   SO THE CRAFT IS NOT IN THE OPENING AT ALL. A breakpoint on the call
+   at img 0x237f never fires across 120 frames of the voxel scene and
+   fires in the countdown, which is what section 2's "a spaceship at
+   the start" was seeing: ../effects/scenes.txt has the countdown as
+   "camera freezes on landscape and ship", and that is the first scene
+   the craft appears in.
+
+4.  The scale trap
+
+   It reads as symmetrical and is not.
+
+   Vec_Rotate3 returns its result MULTIPLIED BY 64. Mesh_SetupTransform
+   removes that with `sar eax/ebx/ecx, 6` at img 0x4634.
+   MESH_TRANSFORMVERTS DOES NOT. A vertex therefore stays at x64 while
+   being added to a translation that was brought DOWN to the same scale
+   from much larger world values.
+
+   Put the shift in both places, as the symmetry invites, and every
+   model collapses to about four pixels across. That is how the
+   omission was found.
+
+5.  Mesh_Draw: cull, light, sort, fill
+
+   1000:465c, and it is the whole object renderer [verified].
+
+   CULLING IS A 2D SCREEN-SPACE WINDING TEST, not the 3D normal: two
+   edge vectors from vertex 2 into g_EdgeAX..g_EdgeBY and a cross
+   product at img 0x472a. Negative is back-facing, and the face's sort
+   key is set to 0.
+
+   EVERY STEP OF IT IS 16-BIT, img 0x470c to 0x473b. The four edge
+   terms are word subtractions of the words Mesh_TransformVerts stored
+   at +0xc and +0xe, both IMULs keep only the low word, AND SO DOES
+   THE SUBTRACTION BETWEEN THEM. Taking a 32-bit difference of two
+   truncated products keeps the wrong sign wherever the true one
+   exceeds a word.
+
+   AND THE CULL ONLY ZEROES THE KEY - IT DOES NOT SKIP THE LIGHTING.
+   img 0x473d stores the 0 and img 0x4744 jumps to img 0x4775, which
+   is ONE INSTRUCTION SHORT of the normal read at img 0x4778, so a
+   back-facing face still accumulates its intensity into all of its
+   vertices [verified]. The face is not drawn; its light still counts.
+
+   THAT IS LOAD-BEARING, not an oversight to tidy. With only the front
+   faces contributing, every vertex averages the lit side alone and the
+   model comes out far too bright and too contrasty. Measured against a
+   running demo at order 0x09, the first five vertices' touch counts
+   are 3, 3, 6, 6, 4 and their shades 6, 2, 32, 39, 32; skipping the
+   lighting on a cull gives 2, 3, 3, 2, 1 and 66, 46, 16, 20, 50 -
+   shades past the band's own 0x3f, which spills a face into the next
+   palette band and turns a blue window cyan. Accumulating for culled
+   faces too makes all ten exact [observed].
+
+   THE SORT KEY IS THE SUMMED VERTEX Z, never divided. img 0x474c
+   scales a triangle's three-vertex sum by 4/3 so it compares against
+   a quad's four - cheaper than a mean and it orders identically.
+
+   LIGHTING IS PER FACE, ACCUMULATED PER VERTEX:
+
+       n = the normal Mesh_FaceNormals left, << 4
+       rotate by g_ObjPitch/Yaw/Roll into world space, >> 6
+       rotate again by g_LightPitch/Yaw/Roll into light space
+       i = (x >> 0xc) + 0x12c, floored at 0, then SQUARED and >> 0xe
+       add i to every vertex of the face, and count the touches
+
+   The square is the falloff - a plain Lambert term is linear - and
+   0x12c is the ambient floor. Then img 0x4848 divides each vertex's
+   accumulated intensity by its touch count and scales by
+   g_ShadeScale >> 9.
+
+   THE NORMAL IS IN MODEL SPACE AND IS ROTATED EXACTLY ONCE, so the
+   lighting here is ordinary. Mesh_FaceNormals is a PREPROCESSOR, not
+   a per-frame step: it is called four times in the whole demo - img
+   0x014c, 0x0474, 0x51aa and 0x52de, once per model - and it sets up
+   its own fixed reference pose first, zero angles and a translation of
+   (0, 0, 0x1e000) at img 0x43d4. img 0x47b5 then takes that stored
+   normal into world space and the light rotation finishes the job.
+
+   IT LEAVES THAT POSE BEHIND. Nothing restores g_ObjTransX, Y or Z
+   afterwards, so A PART THAT SETS ITS OWN TRANSLATION AND THEN BUILDS
+   NORMALS GETS 0x1e000 BACK. The THE END part does exactly that - img
+   0x52a4 asks for 0x20000 and img 0x52de overwrites it three
+   instructions later - and its letters consequently start 0x2000
+   nearer than that read of the script suggests. A transcription that
+   treats the reference pose as local to the routine puts them 32
+   ticks' worth too far away for the whole of the tumble, and the
+   white flash that follows then jumps in size instead of matching.
+   effects/theend.txt section 1.
+
+   TAKING THE NORMAL FROM THE ROTATED VERTICES INSTEAD IS THE TRAP, and
+   it is a plausible-looking one: the shading still moves with the
+   object, so it reads as lighting. What it actually does is rotate the
+   normal twice - the light then sweeps at roughly twice the object's
+   rate, faces go dark pointing at the viewer, and a craft lit from the
+   front in the demo is lit from behind. A reconstruction with this
+   wrong shows two barely-lit ships where the demo shows two clear
+   ones.
+
+   The two rotations do not use the same yaw, and that part is real:
+   the vertices take g_ObjYaw + g_CamAngleNext at img 0x4668 and the
+   normal g_ObjYaw alone at img 0x47a1.
+
+   THE LIGHT DIRECTION IS DELIBERATE, NOT RANDOM. Four writes in
+   Demo_Entry set the triple and the parts between them inherit it
+   [verified]:
+
+   +-----------+------------------------+--------------------------+
+   | At img    | pitch, yaw, roll       | Holds for                |
+   +===========+========================+==========================+
+   | statics   | 0x100, 0xff00, 0       | the opening              |
+   | 0193      | 0x100, 0x421, 0x200    | THE LAUNCH, and the only |
+   |           |                        | part that does not use   |
+   |           |                        | 0xff00 or 0xfe00         |
+   | 02b4      | 0, 0xfe00, 0           | the planet               |
+   | 037f      | 0, 0xff00, 0           | the star cut, both roto  |
+   |           |                        | passes, the chase and    |
+   |           |                        | the first two fights     |
+   | 0657      | 0x100, 0xff00, 0       | the formation fight, the |
+   |           |                        | aftermath, the warp out  |
+   +-----------+------------------------+--------------------------+
+
+   SO THE SHADING IS TRUE GOURAUD FROM AVERAGED FACE NORMALS, which is
+   why Poly_Fill interpolates four independent vertex shades rather
+   than taking one per face.
+
+   THE SORT IS A SELECTION SORT, img 0x4894: scan every face for the
+   largest key, zero it, draw it, repeat, stop when no key is positive.
+   Far to near, and culled faces are already 0 so they fall out for
+   free. O(n^2) on up to 94 faces, which the demo evidently found
+   acceptable at 100 Hz.
+
+   An object's yaw is RELATIVE TO THE CAMERA: img 0x4664 latches
+   g_ObjYaw + g_CamAngleNext. And the clip rectangle latched at
+   img 0x4698 is the whole screen, 0..0x13f by 0..0xc7.
+
+   Static light values from the variable block: g_LightPitch 0x100,
+   g_LightYaw 0xff00, g_LightRoll 0, g_ShadeScale 0x190.
+
+6.  What the reconstruction does
+
+   sim/xcursion/parts.py's mesh_draw, part 12 of sim/xcursion/demo.py. 7 to
+   13 ms a frame for the four models.
+
+   NOTHING IN THE 3D PATH IS OURS ANY MORE. parse_model, vec_rotate3,
+   face_normal, mesh_draw and poly_fill transcribe Mesh_Draw,
+   Mesh_TransformVerts, Mesh_FaceNormals, Vec_Rotate3 and Poly_Fill
+   including the 2D winding cull, the summed-z key with its 4/3
+   triangle scale, the squared Lambert term, the per-vertex averaging,
+   the selection sort, the span buffer's reuse and each face's own
+   palette band. An earlier draft of this section listed four
+   divergences - the cull, the sort, the shade and the band - and all
+   four are now the demo's.
+
+   Two things remain ours and both are outside the renderer: the
+   ROTATION RATE, standing in for whichever animation handler drives
+   the object - g_AnimMode 8, 0xc, 0x18 and 0x1a for the four models,
+   all unread - and the model's DISTANCE.
+
+   One optional divergence, default OFF and labelled on screen: the L
+   key skips the normal's world-space rotation, which pins the light
+   near the viewer instead of letting it turn with the object. It is
+   OURS and exists only so the two can be put side by side. The C key
+   adds camera yaw to the normal's rotation, which is the term the
+   vertex transform includes at img 0x4668 and the normal rotation
+   does not.
+
+   THE NORMALS COME FROM mesh_normals, the reference pose - section 5.
+   Both it and src/xcursion/xcursion_mesh.c reproduce the demo's
+   stored table byte for byte, checked against segment 0x3a79 offset
+   0x8000 for craft A and 0x6a79 for craft B in a running demo
+   [observed].
+
+   SO DOES THE SHADING. The demo leaves each vertex's accumulated
+   intensity and touch count in the same record, at +0x10 and +0x14,
+   and Mesh_Draw overwrites +0x10 with the final shade - so both are
+   readable out of a paused demo. src/ matches all five shades and all
+   five touch counts at order 0x09 and again at order 0x0b [observed].
+
+   One deliberate substitution, with a proof rather than a guess:
+   isqrt_as_demo replaces the descending-search square root at img
+   0x457f, which costs about 12000 Python iterations a face. Checked
+   against the loop over 0..5000, both boundaries and 400 random values
+   below 0x4000 squared - one difference, sq = 0, where the loop
+   returns 1 and so avoids a divide by zero. That case is handled
+   explicitly, so the outputs are identical.
+
+7.  The attribute byte
+
+   THE ATTRIBUTE BYTE IS THE PALETTE BAND BASE. Mesh_Draw copies it
+   straight into g_PolyBandBase at img 0x4947, so a face's colours
+   are a 6-bit Gouraud ramp starting at its own attribute - 0x20 the
+   blue band, 0xc0 the greyscale, and so on.
+
+8.  Open questions
+
+   o THE SHADE RUNS THE WRONG WAY ACROSS THE CRAFT. At the countdown
+     frame the demo's hull is dark on the left and light on the
+     right; the reconstruction's is the mirror of that, over a
+     silhouette that otherwise matches to within a few pixels. Every
+     input has been checked against the running demo and agrees -
+     g_LightPitch 0x100 at img 0x9883, g_LightYaw 0xff00 at 0x9885,
+     g_LightRoll 0 at 0x990f, the object angles at 0x9909/0x9881/
+     0x990b, and the term itself: img 0x47e5 takes the rotated X,
+     `sar 0xc`, `add 0x12c`, clamps at zero and squares with
+     `sar 0xe`. So the discrepancy is in Mesh_FaceNormals' sign or in
+     the `movsx` at img 0x4790 that the reconstruction omits, and
+     neither has been read against the binary yet.
+
+   o **Which model is used where.** Four g_MeshFaces stores are known;
+     which part each belongs to has not been traced.
+
+   o **g_MeshZScale at 1000:9374.** It scales z before rotation, so it
+     is a depth stretch. Its writers have not been chased.
+
+   o **Whether a fifth model exists.** Model 1's faces end at img
+     0x5a8a and model 3 starts at 0x5c47, leaving 445 unaccounted
+     bytes between them.

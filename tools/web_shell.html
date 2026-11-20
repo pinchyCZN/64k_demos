@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title><!--TITLE--></title>
+<!--
+  PCDEMOS 64k - the emscripten page.
+
+  THIS FILE IS A TEMPLATE AND tools/build_web.sh NEVER EDITS IT. It
+  is composed into a throwaway copy under build/; substituting in
+  place would consume the two slots below, and every demo built after
+  the first would silently ship the first one's text.
+
+  NEITHER SLOT'S NAME MAY BE SPELLED ANYWHERE ELSE IN THIS FILE, this
+  comment included - the build replaces by text match, so a mention
+  is a second slot. The content one must also sit ALONE on its line,
+  because the line is deleted once the text has been read in.
+
+  The per-demo text is tools/web/<demo>.html.
+-->
+<style>
+  html, body { margin: 0; padding: 0; background: #111; color: #999;
+               font: 13px/1.6 "Courier New", monospace; }
+  a { color: #6cf; }
+  a:hover { color: #9df; }
+  #wrap { display: flex; flex-direction: column; align-items: center;
+          gap: 10px; padding: 18px 12px 40px; }
+  #stage { position: relative; line-height: 0; max-width: 100%; }
+  canvas { background: #000; image-rendering: pixelated;
+           image-rendering: crisp-edges; outline: none;
+           display: block; max-width: 100%; height: auto; }
+  /* The poster frame shows through, so the demo is what is behind
+     the invitation rather than a black box. */
+  #start { position: absolute; left: 0; top: 0; right: 0; bottom: 0;
+           display: flex; align-items: center; justify-content: center;
+           background: rgba(0, 0, 0, 0.55); cursor: pointer;
+           text-align: center; line-height: 1.6; }
+  #start .big { color: #fff; font-size: 22px; letter-spacing: 2px; }
+  #start .small { color: #bbb; margin-top: 10px; font-size: 12px; }
+  #status { min-height: 1.5em; }
+  #about { max-width: 960px; width: 100%; }
+  #about h1 { font-size: 15px; color: #ccc; margin: 0 0 10px;
+              letter-spacing: 1px; }
+  #about h2 { font-size: 13px; color: #ccc; margin: 22px 0 6px;
+              letter-spacing: 1px; }
+  #about p { margin: 0 0 10px; }
+  #about table { border-collapse: collapse; margin: 0 0 10px; }
+  #about td { padding: 1px 14px 1px 0; vertical-align: top; }
+  #about td.k { color: #cc6; white-space: nowrap; }
+  #about .note { color: #777; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage">
+    <canvas id="canvas" width="960" height="600" tabindex="-1"></canvas>
+    <div id="start">
+      <div>
+        <div class="big">CLICK TO START</div>
+        <div class="small">
+          picture and sound start together<br>
+          a browser will not play audio until you ask it to
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="status">loading...</div>
+  <div id="about">
+<!--CONTENT-->
+  </div>
+</div>
+<script type="text/javascript">
+  var statusEl = document.getElementById('status');
+  var canvas = document.getElementById('canvas');
+  var startEl = document.getElementById('start');
+  var ready = false, wanted = false;
+
+  /* The click may land before the wasm is up, so it is remembered
+     and replayed from onRuntimeInitialized rather than lost. */
+  function begin() {
+    if (!ready) { wanted = true; statusEl.textContent = 'loading...'; return; }
+    if (startEl && startEl.parentNode) startEl.parentNode.removeChild(startEl);
+    try { Module._Host_Start(); } catch (e) { console.error(e); }
+    canvas.focus();
+  }
+
+  var Module = {
+    canvas: canvas,
+    print: function (t) { console.log(t); },
+    printErr: function (t) { console.error(t); },
+    setStatus: function (t) { statusEl.textContent = t; },
+    onRuntimeInitialized: function () {
+      ready = true;
+      statusEl.textContent = '';
+      if (wanted) begin();
+    }
+  };
+
+  startEl.addEventListener('click', begin);
+  /* SDL wants the keyboard, and a canvas only gets it when focused. */
+  canvas.addEventListener('click', function () { canvas.focus(); });
+
+  /* THE BROWSER'S OWN SCROLLING IS THE PROBLEM, not SDL's. A wheel
+     over the canvas is a zoom and space is pause, and both scroll
+     the page as well unless the default is refused. preventDefault
+     stops only that - the event still reaches SDL, which is why
+     stopPropagation must NOT be called here. The wheel listener has
+     to be non-passive or the refusal is ignored. */
+  canvas.addEventListener('wheel', function (e) {
+    e.preventDefault();
+  }, { passive: false });
+
+  window.addEventListener('keydown', function (e) {
+    if (document.activeElement !== canvas) return;
+    switch (e.key) {
+    case ' ':
+    case 'ArrowUp': case 'ArrowDown':
+    case 'ArrowLeft': case 'ArrowRight':
+      e.preventDefault();
+      break;
+    default:
+      break;
+    }
+  }, false);
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

@@ -1,0 +1,491 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                          THE XCURSION PACKER
+
+
+Abstract
+
+   XCURSION.EXE is an LZ-compressed DOS MZ image whose decompressor
+   sits in the clear at the front of the load image, wrapped by a
+   977-byte self-modifying stub at the back whose only job is to hide
+   where execution enters that decompressor.
+
+   It is depacked. tools/unpack/xcur_unpack.py runs the binary's own
+   decompressor under Unicorn and stops at the handoff, recovering the
+   108,432-byte image and the original entry point. The result is
+   xcursion/subsystems/unpacked_image.txt; this document is the format and
+   stops at the handoff.
+
+   The wrapper is a dead end and section 4 says why.
+
+Table of Contents
+
+   1. Addressing in this document
+   2. The load image
+   3. The decompressor
+   4. The entry-point wrapper
+   5. What the packer probably is
+   6. Depacking
+      6.1. Where the image ends
+      6.2. LITHIUM.EXE
+      6.3. The static decoder
+   7. Open questions
+
+1.  Addressing in this document
+
+   Three spellings of the same byte are in play, so every address below
+   is labelled.
+
+   +----------+----------------------------------------------+
+   | Form     | Meaning                                      |
+   +==========+==============================================+
+   | file X   | offset in XCURSION.EXE on disk               |
+   | img X    | offset in the load image, ie. file X - 0x80  |
+   | 1000:X   | Ghidra's CODE_0 block. 1000:X = img X        |
+   | 1be1:X   | Ghidra's CODE_1 block, the wrapper           |
+   | CS:X     | wrapper-relative at run time; CS:X = 1be1:X  |
+   +----------+----------------------------------------------+
+
+   The wrapper begins at img 0xbe10, so CS:X = img 0xbe10+X, and its
+   linear address is 0x1be10+X.
+
+   Inside the decompressor a FOURTH spelling applies and it is the one
+   that catches people: the routine relocates itself before running, so
+   its own CS:0000 is img 0x54 and a CS offset in its code is its img
+   offset minus 0x54. The table it reads as cs:[bx+0x20a] is at
+   img 0x25e.
+
+   None of these relate to the depacked image's addresses. CLAUDE.md
+   rule 3: name the image whenever quoting one.
+
+2.  The load image
+
+   The MZ header is 8 paragraphs and carries no relocations at all
+   [verified]. The load image is the whole of the rest of the file, and
+   the header's stated size matches the file exactly, so nothing is
+   appended past it.
+
+   +------------------+-----------+--------+-----------------------------+
+   | Field            | Value     | Tag    | Notes                       |
+   +==================+===========+========+=============================+
+   | e_cparhdr        | 0x0008    | verif. | header is 0x80 bytes        |
+   | e_crlc           | 0x0000    | verif. | no relocation table         |
+   | e_lfarlc         | 0x00b4    | verif. | points into the image; dead |
+   |                  |           |        | with e_crlc 0               |
+   | e_cs:e_ip        | 0be1:0000 | verif. | the wrapper, not the demo   |
+   | e_ss:e_sp        | 0beb:0000 | verif. | 0x0a paragraphs past e_cs   |
+   | e_minalloc       | 0x76e1    | verif. | 0x76e1 paragraphs of BSS    |
+   | e_cp / e_cblp    | 0x62/0x61 | verif. | 49,761 bytes; file is same  |
+   +------------------+-----------+--------+-----------------------------+
+
+   The image divides into five parts [verified], and only one of them
+   is the demo:
+
+       img 0x0000 - 0x003d    memory check, and the failure message
+       img 0x003e - 0x0053    relocate-and-enter preamble
+       img 0x0054 - 0x025d    the decompressor body, ending in RETF
+       img 0x025e - 0x029b    its match-length table
+       img 0x029c - 0x029f    four bytes, unaccounted for
+       img 0x02a0 - 0xbe0f    the bitstream, 48,368 bytes
+       img 0xbe10 - 0xc1e0    the entry-point wrapper, 977 bytes
+
+   The bitstream's start is measured, not inferred: the depack reads the
+   first 32 bytes the decompressor fetches and finds them at img 0x2a0,
+   uniquely, in the file as loaded [verified].
+
+   Entropy runs 6.7 to 7.7 bits per byte across the payload in 1 KB
+   windows, with no low-entropy region anywhere in it [verified]. That
+   is the profile of LZ77-style compression with no entropy coder
+   behind it; a Huffman or arithmetic stage would sit above 7.9, and
+   plain or merely XOR-encrypted code would sit far below. The depacked
+   image confirms it from the other side: 108,432 bytes out of 48,368,
+   a ratio of 2.24.
+
+3.  The decompressor
+
+   0x20a bytes of code at img 0x0054 plus a 62-byte table, in the
+   clear, not obfuscated [verified].
+
+3.1.  How it is reached
+
+   The preamble at img 0x003e runs with DS = PSP, which is what makes
+   its operands legible: PSP:0x100 is img 0x000, so every DS offset in
+   this preamble is img offset + 0x100.
+
+       img 003e  mov ss, ax
+       img 0041  sub ax, 0x25         AX = a segment 0x25 paragraphs
+       img 0044  mov es, ax             below the top of the image
+       img 0046  push ax
+       img 0047  mov cx, 0x124        0x124 words = 0x248 bytes
+       img 004a  xor di, di
+       img 004c  push di
+       img 004d  mov si, 0x154        DS:0x154 = img 0x054
+       img 0050  cld
+       img 0051  rep movsw
+       img 0053  retf                 far-returns to ES:0000
+
+   So the decompressor copies itself out of the image to a high segment
+   and far-returns into its own copy [verified]. The 0x248 it moves is
+   exactly the body plus the table and nothing else.
+
+   The memory check in front of it, at img 0x0000, compares a required
+   paragraph count against PSP:0x0002 and exits through INT 21h AH=4Ch
+   with a message if it is short [verified]. The message DX it loads is
+   two bytes past where "Not enough memory$" actually starts, so the
+   error path prints a truncated string; harmless, and a hint that the
+   header was hand-patched after assembly.
+
+3.2.  The bitstream
+
+   A 16-bit bit buffer in BP, refilled by LODSW, with DX counting the
+   bits left [verified]:
+
+       img 0094  lodsw                refill
+       img 0095  xchg bp, ax
+       img 0096  mov dx, 0x10         16 bits available
+       ...
+       img 00d3  shr bp, 1            take the low bit into CF
+       img 00d5  dec dx
+       img 00d6  je <refill>
+       img 00d8  jae <literal>
+
+   Bits are taken from the LOW end of the word. Multi-bit codes are
+   gathered into BX with `rcl bx, 1` [verified].
+
+   The refill is INLINED PER CALL SITE: nine three-instruction stubs at
+   img 0x009c, 0x00a2, 0x00a8, 0x00ae, 0x00b4, 0x00ba, 0x00c0, 0x00c6
+   and 0x00cc, each ending in a JMP back to the one place that needed
+   a bit [verified]. This is the single most distinctive thing about
+   the routine and it is a size optimisation, not obfuscation. It also
+   means the routine has no "get bit" subroutine to read once - the
+   logic is spread across nine returns and must be followed per site.
+
+   A literal is a single `movsb` at img 0x00d2 [verified]. Copying is
+   forward: the preamble clears the direction flag at img 0x008a.
+
+   Source and destination at the first LODSW [verified]:
+
+       DS:SI = the payload, moved to the top of memory by the backwards
+               rep movsw at img 0x005e-0x0089, SI = 0
+       ES:DI = PSP:0x0100, which is img 0x0000 - the image start
+
+   So the decompressor overwrites the file it was loaded from, writing
+   forward from the bottom while reading forward from a copy at the top.
+
+   The stream's first word is 0x0000, and a zero tag word means
+   sixteen literals [verified]. The bytes that follow it are the demo's
+   own first instruction, `mov dx, 0x0cd2` - the data segment as a
+   RELATIVE paragraph count. The depacked image holds `mov dx, 0x1cd2`
+   at the same place, which is the original relocation being applied
+   during the run. See section 6.
+
+   ONE 62-BYTE TABLE AT img 0x25e SERVES FOUR LOOKUPS, at four
+   different bases, and reading it as one table per base is what makes
+   the zero entries make sense [verified]:
+
+   +---------------+-------+--------------------------------------+
+   | Instruction   | Base  | What it yields                       |
+   +===============+=======+======================================+
+   | cs:[bx+0x20a] | +0x00 | lengths 4 to 10                      |
+   | cs:[bx+0x215] | +0x0b | lengths 11 to 15, AND the 0x19       |
+   |               |       | escape - only this one can           |
+   | cs:[bx+0x220] | +0x16 | lengths 16 to 24                     |
+   | cs:[bx+0x230] | +0x26 | the HIGH BYTE of a distance, 1 to 13 |
+   +---------------+-------+--------------------------------------+
+
+   Lengths 2 and 3 are not in the table at all: a two-bit code of 2 or
+   3 is used as the length directly.
+
+   The table, read as cs:[bx+0x20a] at img 0x0114 [verified]:
+
+       04 00 05 06 07 00 00 00 00 00 08 09 0a 0b 0c 19
+       00 00 00 00 00 0d 0e 0f 10 11 12 00 00 00 00 00
+       13 14 15 16 17 18 01 02 00 00 03 04 05 06 00 00
+       00 00 00 00 00 00 07 08 09 0a 0b 0c 0d
+
+   The zero entries are codes that cannot occur, which is how the
+   gather loop's early-out comparisons - `cmp bl, 2`, `cmp bl, 5`,
+   `cmp bl, 0xc` at img 0x00ec, 0x0103 and 0x010f - stay consistent
+   with the table.
+
+3.3.  The handoff
+
+   img 0x0239 - 0x025d, the last 24 instructions [verified]. Four
+   LODSW reads walk a four-word table at the end of the stream and
+   install the original entry:
+
+       img 0239  pop cx
+       img 023a  lodsw / add ax,bx     original SS + the load base
+       img 023d  xchg ax,dx
+       img 023e  lodsw                 original SP
+       img 023f  cli / mov ss,dx / mov sp,ax / sti
+       img 0245  lodsw / add bx,ax     original CS + the load base
+       img 0248  push bx
+       img 0249  lodsw                 original IP
+       img 024a  push ax
+       img 024b  mov es,bp / mov ds,bp
+       img 024f  mov ax,cx
+       img 0251  BX CX DX BP SI DI all zeroed
+       img 025d  retf                  to the pushed CS:IP
+
+   Two things follow. The original CS and SS are stored RELATIVE to the
+   load segment and have the base added at run time, which is why the
+   depacked image can be given a valid MZ header. And the instant
+   before that RETF is the one moment when the whole original entry
+   state is readable, which is where the depack stops.
+
+4.  The entry-point wrapper
+
+   977 bytes at img 0xbe10, and the MZ entry point. It is where the
+   demo appears to start and it is not where the work is.
+
+   What it does [verified]: it chains through its own interrupt
+   vectors, and at each stage it XOR-patches bytes of its own code.
+
+       CS:0000  jmp 0x00b0            the MZ entry
+       CS:00b0  jmp 0x00cd
+       CS:00cd  sets SS:SP to itself, DS to the load segment
+       CS:00e6  mov word ptr cs:[0x5a], ax      saves the PSP into
+                                                its own code
+       CS:00ef  installs INT 1  -> CS:0x023d
+       CS:0101  out 0x64, al    AL=0xAD, disable the keyboard
+       CS:0113  installs INT 3  -> CS:0x0137
+       CS:0127  int3                 a one-byte call to CS:0x0137
+       CS:0137  pops the pushed IP into cs:[0xa7], re-points INT 3
+                at CS:0x0190, and int3's again
+       CS:0190  int 1, then patches cs:[0x201], cs:[0x9e],
+                cs:[0xb4], cs:[0x175], cs:[0x1e3]
+       CS:023d  the INT 1 handler: patches cs:[0x8b], cs:[0x203],
+                cs:[0x9e], cs:[0xb2], cs:[0x173], cs:[0x1e1]
+
+   Three things about it are worth knowing and the rest is not:
+
+   o **INT 1 and INT 3 are not debugger traps here, they are
+     one-byte calls.** The stub installs both vectors itself before
+     using them. `int3` is one byte where a far call is five, which on
+     a 64k compo entry is the whole reason. Treating either as an
+     anti-debug trap sends you looking for a check that does not
+     exist; treating `int3` as a breakpoint and stepping over it skips
+     a stage of the chain.
+   o **The patch targets come in pairs**, at CS:0x8b/0x9e,
+     0xb2/0xb4, 0x173/0x175, 0x1e1/0x1e3 and 0x201/0x203, and one of
+     the writes is `mov byte ptr cs:[0x9e], 0xe9` - storing an E9,
+     which is JMP rel16 [verified]. The chain is assembling its exit
+     jump a byte at a time rather than storing a target anywhere a
+     disassembler can see it.
+   o **It does not touch the payload.** No stage holds a count near
+     48,368, and there is no REP or loop over the compressed region
+     anywhere in the 977 bytes [inferred, from a flow-following
+     disassembly that reached 340 of them across the known entries].
+
+   Which gives the one conclusion that matters: **the wrapper hides an
+   entry point, it does not transform the data.** It exists to defeat
+   an automatic unpacker that recognises the packer by its entry code,
+   and the countermeasure is to ignore it and enter the decompressor
+   ourselves, which is what section 6 does.
+
+   The strongest evidence for that conclusion is not the disassembly,
+   it is the result: entering at img 0x0000 and skipping the wrapper
+   entirely produces an image that decompresses, self-checks, and
+   disassembles as code. A wrapper that mattered could not be skipped.
+
+   `tools/unpack/xcur_stub.py` follows the chain for anyone who needs
+   to. Its reach is partial by construction - a self-patching stub's
+   later stages decode from bytes that only exist at run time.
+
+5.  What the packer probably is
+
+   **LZEXE 0.91, or something built directly from it** [inferred].
+
+   The agreeing evidence: a 0x248-byte unpacker that relocates itself
+   with `rep movsw` and far-returns into the copy; a 16-bit LODSW bit
+   buffer with the bit count in DX; per-call-site inlined refills; a
+   match-length table at the end of the unpacker body indexed by a
+   code gathered with `rcl`; a four-word CS/IP/SS/SP table consumed by
+   LODSW at the handoff, with the segments stored relative to the load
+   base; a destination of PSP:0x0100; and no entropy coder.
+
+   The disagreeing evidence, and it is why this is not [verified]:
+   **there is no `LZ91` marker at file 0x1c**, which stock LZEXE 0.91
+   writes there. file 0x1c holds 0x0148 and file 0x1e holds 0x8591.
+   Stripping that marker is exactly what the wrapper in section 4 is
+   for, so an absent signature is consistent with a deliberately
+   de-signatured LZEXE - but it is equally consistent with a different
+   packer of the same lineage, and the two are not distinguishable
+   from the header alone.
+
+   The question is now academic. The format has been read out of the
+   decompressor and the image is out; a published LZEXE description
+   would be a cross-check on that reading, not a route to anything we
+   do not have.
+
+6.  Depacking
+
+   One depacker for all three, because the decompressor is the same
+   bytes in all three - layout.txt section 2. The input is named, so
+   nothing is hardcoded to one demo:
+
+       py -3.10 tools/unpack/xcur_unpack.py \
+           --in  reverse/ghidra/XCURSION.EXE \
+           -o    reverse/unpacked/xcursion.bin \
+           --exe reverse/unpacked/XCURSION_U.EXE
+
+   Runs the binary's own decompressor under Unicorn with a stub DOS,
+   entering at img 0x0000 and stopping at the handoff RETF. Rule 3.1
+   prefers a static reimplementation and this is the emulator; it was
+   taken first because where the bitstream starts is not readable off
+   the listing, and that is the fact a reimplementation needs most.
+   Section 3.2 now states it because this run measured it.
+
+   What comes out for XCURSION.EXE [verified]:
+
+   +----------------------+-------------------------------------------+
+   | Recovered            | Value                                     |
+   +======================+===========================================+
+   | original CS:IP       | load_seg + 0x0000 : 0x0000                |
+   | original SS:SP       | load_seg + 0x0cd2 : 0x0080                |
+   | image size           | 108,432 bytes to the last non-zero byte   |
+   | bitstream start      | img 0x2a0                                 |
+   | destination          | PSP:0x0100, ie. img 0x0000                |
+   +----------------------+-------------------------------------------+
+
+   THE DEPACKED IMAGE CANNOT BE REBASED. The original relocations are
+   applied by the decompressor during the run, so segment immediates
+   in the output are baked for whatever load segment the run used. The
+   depacker therefore uses 0x1000, which is Ghidra's own MZ base, so
+   that those immediates read as addresses in the listing. A dump taken
+   at another base disassembles identically and has different, equally
+   baked, segment constants.
+
+   The run is deterministic: two runs and the committed dump agree to
+   the byte, sha256
+   c26b9e41c8d570f81b8eff31d6ed888fb63394faf5895d99277d7b9cb0377cd8 for
+   xcursion.bin at a load segment of 0x1000. The input is untouched,
+   sha256
+   611c304e54185cf09563253e06264a9cc813a1de7561505697f56b0d2ccaba6a.
+
+   Three checks on the content, and they are independent of each other:
+
+   o **Entropy.** 7.5 bits per byte flat across the input becomes 6.1
+     at the head of the output, falling to 0.0 over the BSS. A failed
+     decompression stays high.
+   o **The relocation self-check.** The stream's literal bytes hold
+     `mov dx, 0x0cd2`; the output holds `mov dx, 0x1cd2`; the handoff
+     independently reports the original SS as load_seg + 0x0cd2. Three
+     readings of the same fact from three places, which no partial or
+     misaligned decompression produces.
+   o **It disassembles.** The first instructions set up SS and DS,
+     mask IRQ1 at the PIC, and set text mode 3 and then VGA mode 13h
+     through INT 10h. See xcursion/subsystems/unpacked_image.txt.
+
+6.1.  Where the image ends
+
+   THE END OF THE IMAGE IS WATCHED, NOT GUESSED FROM TRAILING ZEROS.
+   The decompressor is no help by the time the run stops - it zeroes DI
+   two instructions before the handoff - and the stack bounds nothing,
+   because a demo's own SS can sit inside its image rather than above
+   it, as XCURSION's does.
+
+   So the depacker hooks the only two instructions that store output,
+   the literal path at CS:0x7e and the match copy at CS:0x103, and
+   takes the highest byte either of them wrote [verified].
+
+   THE OBVIOUS METHOD IS WRONG AND LOOKS RIGHT. Scanning back for the
+   last non-zero byte is correct for XCURSION, whose image ends five
+   bytes inside its last paragraph, and it silently truncated LITHIUM
+   by 20,688 bytes - because Lithium's image ENDS IN its music module,
+   whose last sample ends in silence. Nothing about the result looked
+   damaged: it was a clean image that simply stopped, and the only
+   symptom was that the S3M's own parapointers then described a module
+   longer than the file it was in.
+
+   The depacker records both numbers side by side in the .json,
+   `store_end` and `zero_end`, so a future gap between them is visible
+   rather than inferred.
+
+   The store end is then PADDED TO A PARAGRAPH. XCURSION's stores
+   stop at 108,427 and its image is 108,432.
+
+   THE HANDOFF'S TWO PUSHES ARE IN THE IMAGE, AND THEY ARE NOT
+   STORES. Section 3.3 pushes the entry CS and IP onto the stack it
+   has just installed, and XCURSION's SS points INSIDE its own image,
+   so both words land in the output: the dump is taken at the RETF,
+   after both. A decoder that omits them is one byte out, at img
+   0xcd9f, and nothing else about its output is wrong - which is the
+   hardest kind of discrepancy to attribute.
+
+   THEY MUST NOT SET THE END, THOUGH. LITHIUM's SS points above its
+   image, so there the same two pushes land at img 0x8b51e and
+   counting them as output claims 570,656 bytes for an image of
+   175,392. So: the stores fix the end, the end is padded, and a push
+   is applied only where it falls inside.
+
+6.2.  LITHIUM.EXE
+
+   Depacks with the same tool and no per-file work at all - no new
+   stop address, no new stream offset, nothing but `--in` [verified].
+   Section 2's reading of the four differing bytes was right.
+
+   +----------------------+-------------------------------------------+
+   | Recovered            | Value                                     |
+   +======================+===========================================+
+   | original CS:IP       | load_seg + 0x0000 : 0x0000                |
+   | original SS:SP       | load_seg + 0x8ad2 : 0x0800                |
+   | image size           | 175,392 bytes, from the store watch       |
+   | zero-trim would say  | 154,704 - wrong by 20,688, see 6.1        |
+   | bitstream start      | img 0x2a0, the same as XCURSION           |
+   | destination          | 0ff0:0100, ie. img 0x0000                 |
+   +----------------------+-------------------------------------------+
+
+   ITS ENTRY POINTS AT 0x100 BYTES OF ZEROS AND THAT IS NOT A FAULT.
+   The stream encodes them, the handoff reports 1000:0000, and the code
+   begins at 1000:0100. See lithium/README.txt section 3, which also
+   says why it still runs.
+
+6.3.  The static decoder
+
+   src/xcurpack.c, 260 lines of C89 and no emulator. It reads the
+   62-byte table out of the file rather than embedding a copy, so the
+   table stays a fact about the binary.
+
+   Verified byte-exact against both committed dumps - 108,432 bytes
+   of XCURSION and 175,392 of LITHIUM - and both recover the entry
+   state section 6 records: CS:IP 1000:0000 for each, SS:SP
+   1cd2:0080 and 9ad2:0800 [verified].
+
+       literals 26,151  matches 9,704   relocations 128   XCURSION
+       literals 29,994  matches 14,929  relocations 163   LITHIUM
+
+   THE OUTPUT IS ADDRESSED FLAT AND THE 0xfe ESCAPE THEREFORE DOES
+   NOTHING. Its only job in the original is to renormalise ES:DI and
+   DS:SI so DI stays near 0x2000 and a back-reference cannot
+   underflow a 16-bit offset; the linear address it produces is
+   unchanged, so a flat decoder skips the arithmetic and only has to
+   honour the two things the escape also does - 0xff ends the stream
+   and NEITHER value copies anything. DI reaches 0xc0a6 at most, so
+   it never wraps and no aliasing has to be modelled.
+
+7.  Open questions
+
+   o **The wrapper does not run to completion under the emulator.**
+     Starting at the MZ entry with `--wrapper`, it executes 630,424
+     instructions inside its own 977 bytes and then faults fetching
+     1be1:4147, an offset far past its end. So the claim in section 4
+     that the wrapper is skippable rests on the static reading and on
+     the depack working, NOT on having executed the chain. The likely
+     cause is this emulator's INT 1 and INT 3 dispatch - the return
+     address it pushes, or the trap flag it does not model - rather
+     than anything about the binary.
+
+   o **Four bytes at img 0x029c - 0x029f** sit between the table and
+     the bitstream and are not accounted for. They are zero in both
+     files and the decoder never reads them, so they cost nothing -
+     but nothing explains them either.
+
+   o **Where the wrapper's assembled exit jump lands.** Still not
+     readable statically, and no longer needed.
+
+   o **The 637 wrapper bytes the flow walk does not reach.** Some will
+     be the patched-in later stages; some will be padding. Not worth
+     resolving unless the wrapper turns out to matter after all.

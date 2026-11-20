@@ -1,0 +1,128 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                       UKKO: THE STICK FIGURE
+
+
+Abstract
+
+   How the dancing figure reaches the screen. All [verified] from
+   the depacked listing.
+
+   IT IS DRAWN AS LINES, ONE PIXEL AT A TIME, in mode 13h - not as
+   polygons and not in the planar mode the logo uses.
+
+   Addresses are in the depacked image, program UKKO_U.EXE, whose
+   CODE_1 begins at 1020:0000.
+
+Table of Contents
+
+   1. Reading the addresses
+   2. The per-frame path
+   3. Line_Draw
+   4. The DDA
+   5. The endpoint smoothing
+   6. Open questions
+
+1.  Reading the addresses
+
+   GHIDRA PRINTS BRANCH TARGETS AGAINST A 1000: BASE WHILE THE
+   LISTING USES 1020:, so a printed target is 0x200 higher than the
+   listing address it names. A call shown as 0x1000:0697 is
+   1020:0497. Reading one as the other lands mid-instruction in a
+   routine that looks plausible, because this code is unrolled and
+   the same shapes repeat.
+
+2.  The per-frame path
+
+   Demo_Main, after the logo:
+
+       INT 10h AX=0x13                 BACK to mode 13h
+       g_KeyframePtr = 0x8a5
+       g_FrameCount++
+       esi = g_KeyframePtr
+       es = 0x7098
+       maybe_Line_SmoothEndpoints      1020:ea23
+       PUSH CS / CALL Line_Draw        1020:0497
+
+   MODE 0Dh IS ONLY FOR THE LOGO. The demo sets 13h, programs a grey
+   ramp, switches to 0Dh to blit one bitplane, holds it, then sets
+   13h again for the dance - ../subsystems/startup.txt section 3.
+   That is why g_RowOffsets holds y*320: a 13h stride.
+
+3.  Line_Draw
+
+   1020:0497. Entered with the endpoints already in place:
+
+   +------------+------------+------------------------------------+
+   | Address    | Name       | What                               |
+   +============+============+====================================+
+   | 1020:013b  | g_LineX0   | start x, dword                     |
+   | 1020:013f  | g_LineY0   | start y                            |
+   | 1020:0143  | g_LineX1   | end x                              |
+   | 1020:0147  | g_LineY1   | end y                              |
+   | 1020:014f  | g_LineDx   | x1 - x0                            |
+   | 1020:0153  | g_LineDy   | y1 - y0                            |
+   | 1020:0157  | g_LineSignX| -1, 0 or 1                         |
+   | 1020:015b  | g_LineSignY| -1, 0 or 1                         |
+   | 1020:0163  | g_LineCurX | the walking x                      |
+   | 1020:016f  | g_LineStepY| whole part of the y step           |
+   | 1020:0173  | g_LineFrac | fractional part, a byte            |
+   | 1020:0177  | g_RowOffsets | 200 dwords of y * 320            |
+   +------------+------------+------------------------------------+
+
+   The inner loop, one of several:
+
+       reject if ebx < 0, ebx > 0xc7,
+                 g_LineCurX < 0, g_LineCurX > 0x13f
+       eax = CS:[ebx*4 + 0x177] + g_LineCurX
+       ES:[eax] = dh
+       dl  += g_LineFrac
+       ebx -= g_LineStepY WITH BORROW
+       g_LineCurX += ebp
+       LOOP
+
+   EBX IS Y AND INDEXES g_RowOffsets DIRECTLY, which is the whole
+   reason the table exists: one dword fetch replaces a multiply per
+   pixel.
+
+   DH CARRIES THE COLOUR and ES the target segment, so the same
+   routine serves the screen and any off-screen buffer.
+
+   IT IS UNROLLED PER DIRECTION. Several near-identical loops follow
+   one another with NOP pairs between the bounds tests, one for each
+   sign combination - which is why the same four tests appear over
+   and over in the listing.
+
+4.  The DDA
+
+       add dl,  g_LineFrac
+       sbb ebx, g_LineStepY
+
+   THE CARRY IS THE ALGORITHM. DL holds the fractional position; the
+   carry out of the byte add is consumed by the SBB, so y takes one
+   extra step exactly when the fraction wraps. There is no error
+   term and no comparison - the two instructions are the whole
+   Bresenham decision.
+
+   CLIPPING REJECTS THE PLOT, NOT THE STEP. Every bounds failure
+   jumps to the `add dl` after the store, so the walk continues off
+   screen and re-enters in the right place. Skipping the step
+   instead would bend the line.
+
+5.  Where the endpoints come from
+
+   Pose_Tween at 1020:e823 runs once per bone, immediately before
+   Line_Draw, and leaves the four endpoint variables holding an
+   interpolation between two keyframes. The pose format, the
+   skeleton and the blend are ../formats/pose.txt.
+
+   NOTHING BUFFERS A POSE. Pose_FetchJointPair writes straight into
+   g_LineX0 to g_LineY1, so exactly one bone is live at any moment
+   and Demo_Main's unrolled list of twelve joint pairs IS the
+   skeleton.
+
+6.  Open questions
+
+   o What g_FrameCount at 1020:e57b gates. It is incremented every
+     frame and read somewhere not yet found.

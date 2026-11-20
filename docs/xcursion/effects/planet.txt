@@ -1,0 +1,349 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                   EXCURSION: THE MAPPED SPHERE
+
+
+Abstract
+
+   Planet_Render at 1000:2925 and Planet_BuildMap at 1000:42d8: a
+   texture-mapped sphere over a starfield with a 3D object in front.
+
+   Six parts call it, more than any other renderer in the demo, and in
+   four of them THE BALL IS SUPPRESSED - the same function serves as
+   the plain space scene. That is what made it hard to recognise.
+
+   The texture is the 256x256 diamond-square field the landscape uses
+   as its heightmap, drawn through the land and water bands, so one
+   planet carries the terrain colours without a byte of extra data.
+
+Table of Contents
+
+   1. The table
+   2. The renderer
+      2.1. It ends on a row, not just an order
+   3. The approach
+   4. Which part draws what
+      4.1. The sync 0x0c part's block, in full
+      4.2. The starfield has its own camera
+   5. The transcription
+   6. Open questions
+
+1.  The table
+
+   Planet_BuildMap fills SEGMENT 0x6a79, the general scratch buffer,
+   with 128x128 words - one per screen sample, each a packed texture
+   offset, or 0xf380 for "off the ball" [verified]. 0x6a79 is a segment
+   value, so it is linear 0x6a790 and nothing to do with image offset
+   0x6a79.
+
+   It starts by building its own square table, 90 entries at
+   cs:0xaf7c [verified]:
+
+       img 42d8    g_SqrTable[k] = (k+1)^2,  k = 0 to 89
+
+   The +1 keeps the centre sample off zero, and it is why
+   Sqr_NearestRoot returns an offset one entry past the answer.
+
+   The radius falls out of one subtraction [verified]:
+
+       img 42ef    AX = g_SqrTable[63] - g_SqrTable[31]
+                      = 64*64 - 32*32
+                      = 3072
+       img 42fb    Sqr_NearestRoot -> g_PlanetRadiusSq
+       img 4334    read back as the nearest square, 3025
+
+   SO THE SPHERE HAS RADIUS 64 AND IS CLIPPED AT z = 32. The disc on
+   screen is radius 55 inside a 128-wide box, and the visible cap
+   subtends 60 degrees - cos = 32/64.
+
+   Per sample, img 0x430b to 0x43aa [verified]:
+
+       r^2 = (|cl-64|+1)^2 + (|ch-64|+1)^2       two table reads
+       if 3025 <= r^2:  [di] = 0xf380, done      img 43a1
+       z   = sqrt(64*64 - r^2)                   Sqr_NearestRoot
+       u   = ((64 - ch) * 64 + z) / z + 64       img 4357-4370
+       v   = ((64 - cl) * 64 + z) / z + 64       img 4373-438e
+       [di] = u | (v << 8)                       img 439c
+
+   The parameterisation is LATERAL OVER Z - the tangent, not the true
+   spherical arcsine. It still compresses toward the limb, which is
+   what makes it read as a ball and not a lens [verified by
+   transcription]:
+
+       +------------------+--------------------------+
+       | Where            | Texels per 16 pixels     |
+       +==================+==========================+
+       | at the centre    | 17                       |
+       +------------------+--------------------------+
+       | at the rim       | 26                       |
+       +------------------+--------------------------+
+
+   Both coordinates are negated, so the texture is mapped THROUGH the
+   centre - mirrored in both axes. The half-divisor added before each
+   divide is round-to-nearest.
+
+   9033 of the 16384 samples are inside the ball, 55.1 per cent
+   [verified by transcription].
+
+2.  The renderer
+
+   Planet_Render draws three things in order [verified]:
+
+       img 2925    clear g_WorkSeg, 0x3e80 dwords = 320x200
+       img 2935    POINTS_RENDER - the stars go down first
+       img 293d    ES = SEGMENT 0x6a79   the offset table
+       img 2942    FS = SEGMENT 0x2a79   THE TEXTURE
+       img 2957    BP = g_PlanetTexPan
+                   ... the ball ...
+       img 299b    MESH_DRAW - the object goes in front
+       img 299e    Vga_Present
+
+   Segment 0x2a79 is the 256x256 field Plasma_Generate writes and
+   Voxel_Render reads as its heightmap - see effects/voxel.txt. The
+   planet surface IS the landscape heightmap, sampled from a different
+   starting offset.
+
+   The colour, img 0x2978 [verified]:
+
+       texel >> 2, then - 0x20, then & 0x3f
+
+   which lands in palette 0 to 0x3f: Pal_BuildMain's land band at 0 to
+   0x1f and water band at 0x20 to 0x3f. See subsystems/palette.txt. So
+   the ball comes out brown-and-blue like the terrain, roughly half
+   each [verified by transcription].
+
+   PAL_BUILDGREYLOW BEFORE THE SYNC 0x34 CALL REWRITES 0 TO 0x1F AS
+   GREY. The same ball, the same table, the same texture - and a grey
+   moon.
+
+2.1.  It ends on a row, not just an order
+
+   img 0x29a4 to 0x29ba - the loop takes TWO conditions and keeps
+   going while EITHER holds [verified]:
+
+       order < g_MusicPosTarget          img 0x29ad
+       row   < g_9917                    img 0x29ba
+
+   So a part running this renderer does not stop at an order
+   boundary. It runs on until the row counter inside the current
+   pattern reaches g_9917, which both the sync 0x0c planet and the
+   star cut after it set to 0x16.
+
+   THAT IS WHAT TIMES THE PART AFTER IT. The rotozoomer inherits the
+   counter at 22 rather than 0, and mode 5 stops working at 24, so it
+   gets three rows rather than twenty-four - see effects/roto.txt
+   section 4. Ending on the order alone hands the next part a counter
+   of zero and its effect runs four times too long.
+
+3.  The approach
+
+   g_PlanetApproach at cs:0x9464 is reloaded PER ROW at img 0x2961 and
+   advanced 0x400 per column; img 0x2967 skips every column whose
+   running value reaches 0x38000 [verified]. So it is a column count,
+   not a perspective scale - the ball never changes size.
+
+   THE CUTOFF COUNT AND THE SCREEN ORIGIN ARE THE SAME NUMBER, which
+   is why no write ever wraps across a row:
+
+       origin x = 224 - (approach >> 10)          img 2947
+       columns  = (0x38000 - approach) >> 10      img 2967
+       both equal N
+
+   Column i lands at x = N - i, and the first 11 table columns are the
+   sentinel, so writes run from x = N-11 down to x = 1. The ball enters
+   at the left edge, is whole from N = 118, and lands centred at x =
+   160 when approach is 0 [verified by transcription]:
+
+       +-------------+---------+---------------------------+
+       | approach    | columns | drawn extent              |
+       +=============+=========+===========================+
+       | 0xfa000     | 0       | nothing at all            |
+       +-------------+---------+---------------------------+
+       | 0x30000     | 32      | x   1.. 21                |
+       +-------------+---------+---------------------------+
+       | 0x24000     | 80      | x   1.. 69                |
+       +-------------+---------+---------------------------+
+       | 0x1a800     | 118     | x   1..107  - whole       |
+       +-------------+---------+---------------------------+
+       | 0x0         | 128     | x 107..213  - centred     |
+       +-------------+---------+---------------------------+
+
+   Four of the six parts set it to 0xfa000, skipping all 128 columns.
+   THE BALL IS SIMPLY NOT THERE in those parts and Planet_Render is the
+   plain starfield-and-object scene.
+
+4.  Which part draws what
+
+   Every call site, with the mode and sync target in force [verified]:
+
+   +------+------+-------+--------------+-----------------------------+
+   | img  | sync | mode  | approach     | What is on screen           |
+   +======+======+=======+==============+=============================+
+   | 02e9 | 0x0c |  4    | 0, the       | THE PLANET. Centred, pan    |
+   |      |      |       | static value | 0x8000, under Pal_BuildMain |
+   |      |      |       |              | - brown and blue            |
+   +------+------+-------+--------------+-----------------------------+
+   | 03b1 | 0x0d |  4    | 0xfa000      | stars and the object        |
+   +------+------+-------+--------------+-----------------------------+
+   | 04da | 0x15 |  8    | 0xfa000      | stars and the object        |
+   +------+------+-------+--------------+-----------------------------+
+   | 0542 | 0x16 |  8    | 0xfa000      | stars and the object        |
+   +------+------+-------+--------------+-----------------------------+
+   | 4dcf | 0x33 |  8    | 0xfa000      | stars and the object, and   |
+   |      |      |       |              | IT FADES IN FROM WHITE      |
+   +------+------+-------+--------------+-----------------------------+
+   | 4e94 | 0x34 | 0x14  | 0, set at    | THE MOON. Centred, pan      |
+   |      |      |       | img 4e0e     | 0xc0, Pal_BuildGreyLow      |
+   +------+------+-------+--------------+-----------------------------+
+
+   THE MOON'S SURFACE IS THE PLASMA TURNED INTO A SLOPE AND BACK
+   [verified]. Its part generates a cloud into 0x2a79 with mask 0x3ff
+   and bias 0x200 - a flatter one than any other part asks for - runs
+   Terrain_BuildShade over it into 0x4a79, and then img 0x4e64 copies
+   that back as (v << 2) + 0x80.
+
+   THAT TRANSFORM AND THE RENDERER'S CANCEL. Planet_Render finishes
+   every texel with (t >> 2) - 0x20 at img 0x297b, which undoes it
+   exactly, so THE INDEX REACHING THE SCREEN IS THE SHADE - and
+   Terrain_BuildShade clamps that to 1 .. 0x1e. Live, the moon's
+   pixels are 0x06 to 0x14 [observed].
+
+   Which is why Pal_BuildGreyLow at img 0x3e79 only writes THIRTY-TWO
+   ENTRIES and stops: 0 to 0x1f is the whole range the moon can
+   produce. It greys exactly that band and leaves the craft's own
+   entries, 0xce and up, as Pal_BuildMain left them.
+
+   The part does NOT set the shade scale or divisor - cs:0x986d and
+   cs:0x986f carry the opening's 0x1000 and 0x53 [verified]. It sets
+   only the field size and origin, to the same full 256 by 256 the
+   opening uses. effects/voxel.txt section 1.2.
+
+   THE SYNC 0x33 PART IS THE ONLY ONE OF THE SIX THAT FADES IN, and
+   it fades FROM WHITE, not from black [verified]. img 0x4dbb sets
+   g_FadeLevel to 0x3d80 - POSITIVE, just under Pal_Fade's +0x4000
+   clamp, so the bias it adds washes every entry to full - and mode 8
+   walks it back down to 0 by 0x60 a tick at img 0x124e. Every other
+   fade in the demo climbs from a negative level, so reading this one
+   as the usual fade gives a part that starts black and ends white.
+
+   That fade belongs to this part and not to the tunnel exit before
+   it: the exit ends on its own black, and nothing between img 0x0a2a
+   and img 0x4dbb touches the level.
+
+   It is also the first part of Demo_Timeline, which Demo_Entry
+   reaches by a JMP at img 0x0a37 rather than a call - so the sync
+   0x32 tunnel is the last part of one chain and this is the first of
+   the next. effects/timeline.txt section 2.
+
+   Both balls START centred and whole, and both then MOVE: the mode 4
+   animation handler at img 0x101e runs in the sync 0x0c and 0x0d
+   parts and does
+
+       inc g_PlanetTexPan                   the surface rotates
+       g_PlanetApproach += 2 * the rotated x of the craft's heading
+
+   so the planet turns one texel of pan a tick and drifts across the
+   screen BECAUSE THE CRAFT IS FLYING, not on a timer of its own
+   [verified]. See subsystems/animation.txt section 2.3.
+
+   The two balls differ in their starting g_PlanetTexPan - 0x8000
+   against 0xc0, so different regions of the same field - and in the
+   palette.
+
+   g_PlanetApproach is statically 0 in the image, which is what puts
+   the planet on screen at sync 0x0c without any part writing it
+   [verified]. Nothing re-zeroes it until img 0x4e0e, so once sync 0x0d
+   sets 0xfa000 the ball stays away for the whole middle of the demo.
+
+   The sync 0x34 moon has mode 0x14, whose handler at img 0x1702 does
+   g_PlanetTexPan -= 0x100 EVERY FOURTH TICK [verified]. So the moon
+   turns too - backwards, one texture row per four ticks, against the
+   planet's forward one texel a tick. Two different rates and two
+   different directions out of the same renderer.
+
+   This also settles the four parts at sync 0x0d, 0x15, 0x16 and 0x33
+   that effects/timeline.txt listed as unexplained uses of an
+   unidentified renderer: they are the space and battle scenes, stars
+   plus a craft, drawn by the planet routine with its planet turned
+   off.
+
+4.1.  The sync 0x0c part's block, in full
+
+   img 0x0253 to 0x02e2, and NOTHING HERE IS INHERITED - the part
+   sets its own craft, its own light and its own bias before calling
+   the renderer [verified]:
+
+   +------------------+---------+------------------------------------+
+   | Global           | Value   | At img                             |
+   +==================+=========+====================================+
+   | transform x, y   | 0       | 0x0253, 0x025b                     |
+   | transform z      | 0x2e000 | 0x0265                             |
+   | obj pitch/yaw/   | 0       | 0x026f, 0x0276, 0x027d             |
+   |   roll           |         |                                    |
+   | g_CamAngleNext   | 0       | 0x028b                             |
+   | g_SkyBias        | 0x1c    | 0x0292                             |
+   | g_GroundRamp     | 0x1c    | 0x0299                             |
+   | g_LightPitch     | 0       | 0x02b4                             |
+   | g_LightYaw       | 0xfe00  | 0x02bb                             |
+   | g_LightRoll      | 0       | 0x02c2                             |
+   | g_AnimMode       | 4       | 0x02c9                             |
+   | g_MusicPosTarget | 0x0c    | 0x02db                             |
+   +------------------+---------+------------------------------------+
+
+   THE CRAFT STARTS DEAD AHEAD AND COMES AT THE CAMERA. Mode 4 adds
+   the rotated z of a -0x10 step to the transform every tick, and
+   Vec_Rotate3 returns times 64, so at yaw 0 that is -1024 a tick
+   against a starting 0x2e000 - about 184 ticks to reach the eye.
+
+   The light is NOT the opening's: yaw 0xfe00 here against 0xff00
+   there, with pitch and roll both zero.
+
+4.2.  The starfield has its own camera
+
+   Points_Render subtracts g_StarCamX, g_StarCamY and g_StarCamZ at
+   img 0x9919, 0x991b and 0x991d before projecting, and MODE 4 IS
+   WHAT FLIES THEM - img 0x1072 and img 0x1077 add half the rotated
+   x and a quarter of the rotated z plus 0x200. Nothing else writes
+   them, so leaving them at zero gives a correct but frozen field.
+
+   EVERY SUBTRACTION THERE IS 16-BIT and wraps - img 0x3222, 0x3227
+   and 0x322c are `sub` on word registers, and the shift at img
+   0x3231 is `shr`, unsigned. A star and the camera are each a
+   signed word, so their difference can leave 16 bits; doing it in
+   32 bits and shifting arithmetically sends whole regions of the
+   field off screen at once, where the demo wraps them round and
+   keeps the count steady.
+
+   The two cutoffs at img 0x3241 and img 0x324d are `jae`, so they
+   are unsigned over the 16-bit result and need no separate test for
+   a negative coordinate.
+
+5.  The transcription
+
+   src/xcursion/xcursion_planet.c has all four routines in C, and
+   BOTH OF THE SPHERE MAP'S DIVIDES ARE IDIV - img 0x4370 and img
+   0x438c - so they truncate toward zero. C's / is right; the Python
+   below floors and so differs over the half of the sphere where
+   0x40 - c goes negative, the same class of divergence recorded in
+   ../formats/mesh.txt section 3.1.
+
+   sim/xcursion/parts.py has planet_build_map and planet_render, and
+   sim/xcursion/demo.py parts 13 and 14 are the planet and the moon. A and S
+   drive g_PlanetApproach so the slide in section 3 can be watched.
+
+   Nothing in either is ours. The position, size, texture coordinates,
+   colour mapping and column cutoff are all the demo's, and the two
+   parts use the demo's own pan values and palettes. The object
+   ROTATION RATE is ours, as everywhere else - see formats/mesh.txt.
+
+6.  Open questions
+
+   o Which object is in front in each of the six parts. Mesh_Draw reads
+     g_MeshFaces, and effects/timeline.txt section 3 places the stores,
+     but the sync 0x0c and 0x33 parts set no model of their own and
+     inherit whatever the previous part left.
+
+   o Sqr_NearestRoot saturates above 8100 - 90 entries. Both callers
+     stay under 4096, so it is not reached here.
+

@@ -1,0 +1,187 @@
+PCDEMOS 64k                                                Analysis Note
+
+
+                      UKKO: THE TIMELINE
+
+
+Abstract
+
+   How the demo is paced, what it switches and when, and where the
+   scenery lives. All [verified] from the depacked listing except
+   where marked.
+
+   THE DEMO IS CALLED "StickMan's World" - its own title screen says
+   so, section 4.
+
+   THERE IS NO VECTOR SCENERY. Only the figure is drawn as lines;
+   the lounge, the floor and the kitchen are full-screen 1-bit
+   bitmaps.
+
+Table of Contents
+
+   1. The frame loop
+   2. Pacing
+   3. The schedule
+   4. The assets
+   5. Open questions
+
+1.  The frame loop
+
+   Demo_FrameLoop, 1020:e6b6 to 1020:f24f, re-entered from the key
+   test at 1020:f24b.
+
+       twelve bones: g_JointA / g_JointB, Pose_Tween, Line_Draw
+       g_KeyframePtr += 0x30;  g_FrameIndex++
+       if g_FrameIndex >= 0x2b6:  exit
+       copy 0xfa00 from 7098:0000 to a000:0000
+       wait one vertical retrace on 0x3da
+       the scene switches, below
+       on g_SceneId, copy a backdrop into 7098:0000
+       Music_Driver(4)
+       the logo interludes, below
+       IN AL,0x60;  exit on scancode 1
+
+   THE BACK BUFFER AT 0x7098 IS NEVER CLEARED. The scene handler
+   overwrites it wholesale with a backdrop every frame, and that is
+   what erases the previous figure - there is no clear and no dirty
+   rectangle. The bones are drawn into it, then the whole 64,000
+   bytes go to 0xa000.
+
+   IT DOES NOT LOOP. g_FrameIndex counts to 0x2b6 - 694 - and
+   1020:eff5 jumps to the exit at 1020:f28c, which stops the music,
+   sets mode 3 and returns to DOS.
+
+2.  Pacing
+
+   The loop waits for ONE vertical retrace, at 1020:f044: it spins
+   until bit 3 of 0x3da clears, then until it sets. Mode 13h retraces
+   at 70 Hz, so the demo displays 70 frames a second.
+
+   IT ADVANCES A KEYFRAME EVERY EIGHTH FRAME. g_PartIndex counts 1,
+   then 3 to 9, and ONLY the PartIndex 1 pass reaches the advance at
+   1020:efda - the tween path jumps over it at 1020:e820. The other
+   seven passes redraw the same keyframe pair at the intermediate
+   positions of ../formats/pose.txt section 5.
+
+   SO THE FIGURE MOVES AT 8.75 KEYFRAMES A SECOND AND IS DRAWN AT
+   SEVENTY. That is what makes it smooth: the traced poses are
+   coarse, and seven interpolated frames sit between each pair.
+
+   THE WHOLE RUN ACCOUNTS FOR ITSELF:
+
+       title hold      425 frames      img 1020:e667, 0x1a9 retraces
+       the dance      5552             694 keyframes x 8
+       3 interludes    600             0xc8 retraces each
+                      ----
+                      6577 frames = 94 s at 70 Hz
+
+   which is the length of the demo.
+
+   70 Hz IS NOT A DISPLAY RATE ANY MORE. Mode 13h retraced at 70 and
+   a modern monitor is 60, so a port that runs one demo frame per
+   presented frame plays the whole thing a sixth slow. The C host
+   drives the demo from a fixed timestep off the wall clock and
+   presents whenever the display lets it - src/main_sdl.c.
+
+   AUDIO CANNOT BE QUEUED PER PRESENTED FRAME EITHER, for the same
+   reason: a fixed 630 pairs a frame at 60 Hz delivers 37,800 samples
+   a second into a device consuming 44,100, and the queue drains. The
+   gaps do not sound like silence, they sound like grit and a tune
+   that drags, which is easy to mistake for a replayer fault. The
+   host tops the queue up to a DEPTH instead.
+
+3.  The schedule
+
+   Two independent schedules run off g_FrameIndex.
+
+   The SCENE, in g_SceneId at 1020:e558, selects which backdrop is
+   copied into the back buffer:
+
+       frame 0      1,  set by Demo_Main at img 0xe645
+       frame 0x86   2
+       frame 0x208  1
+       frame 0x21e  3
+
+   THE INTERLUDES interrupt the dance with a held screen:
+
+       frame 0x6e   g_LogoMuzac     mode 0Dh plane
+       frame 0x193  g_LogoProdigy   mode 0Dh plane
+       frame 0x208  g_ScreenSweat   a FULL mode 13h screen
+
+   A LOGO INTERLUDE sets mode 0Dh, blits one 8,000-byte plane to
+   0xa000, holds for CX retraces - 0xc8, about three seconds - then
+   sets mode 13h again and rejoins the loop.
+
+   THE THIRD ONE IS NOT A PLANE and does not change mode. At
+   1020:f1f4 it tests g_PartIndex == 1, sets mode 13h, copies 64,000
+   bytes from g_ScreenSweat and holds for 0x64 - half as long. It is
+   structurally a backdrop, so the two kinds cannot share a blit, and
+   an index into the logo table will not reach it.
+
+   FRAME 0x208 DOES BOTH, switching the scene back to 1 and running
+   an interlude.
+
+4.  The assets
+
+   FOUR BACKDROPS, each a full 320x200 mode 13h screen of 64,000
+   bytes, copied whole:
+
+   +------+----------------+-----------------+---------------------+
+   | Seg  | Image offset   | Name            | Content             |
+   +======+================+=================+=====================+
+   | 1f4a | 0x0f4a0        | g_BackdropLounge| painting, bench, TV |
+   | 2eeb | 0x1eeb0        | g_BackdropFloor1| a bare floor line   |
+   | 3e8c | 0x2e8c0        | g_BackdropFloor2| the same, shifted   |
+   | 4e2d | 0x3e2d0        | g_BackdropKitchen| a cabinet or fridge|
+   +------+----------------+-----------------+---------------------+
+
+   EACH HOLDS EXACTLY TWO PIXEL VALUES [verified by counting], so
+   the scenery is one bit deep however the palette is set. They are
+   between 0.5 and 3.4 per cent nonzero, which is why the middle of
+   the image reads as sparse - ../README.txt section 3.
+
+   ONE MORE FULL SCREEN, in the same form as the four backdrops and
+   16 bytes past the end of the last of them:
+
+   +------+----------------+-----------------+---------------------+
+   | Seg  | Image offset   | Name            | Content             |
+   +======+================+=================+=====================+
+   | 5dce | 0x4dce0        | g_ScreenSweat   | four lines of text  |
+   +------+----------------+-----------------+---------------------+
+
+   It reads "Dancin' makes me sweat, how to cool down??" across four
+   lines, and like the backdrops it holds exactly two pixel values,
+   4.2 per cent of them nonzero. THE FONT'S LOWERCASE a IS A PLAIN
+   ROUND BOWL with no stem, so it is easily misread as an o.
+
+   Only five screens in this form exist. The whole image was swept
+   for paragraph-aligned 64,000-byte blocks holding exactly two
+   values and these are all of them, so no further screen is
+   unaccounted for [verified].
+
+   THREE LOGO PLANES, 8,000 bytes each - 320*200/8, one plane of
+   mode 0Dh:
+
+   +-------------+-----------------+---------------------------+
+   | CS offset   | Name            | Reads                     |
+   +=============+=================+===========================+
+   | 0x8795      | g_LogoTitle     | StickMan's World          |
+   | 0xa6d6      | g_LogoMuzac     | Wow, that's sum good      |
+   |             |                 | muzac! I feel like        |
+   |             |                 | Dancin'                   |
+   | 0xc617      | g_LogoProdigy   | HOW ABOUT SUM THE PRODIGY |
+   +-------------+-----------------+---------------------------+
+
+   g_LogoTitle is the one Demo_Main shows before the dance starts.
+
+5.  Open questions
+
+   o Why g_PartIndex cycles one to nine. It selects the DRAWING
+     path, not the pacing: at 1 the loop jumps to 1020:eee0, which
+     draws the same twelve bones by calling Pose_FetchJointPair
+     directly, with no Pose_Tween and so no interpolation. Every
+     ninth frame is therefore drawn straight from the keyframe.
+     What that is for has not been established.
+
+   o Why there are two floor backdrops that look alike. The
+     difference between 0x1eeb0 and 0x2e8c0 has not been measured.
